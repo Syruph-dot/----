@@ -1,0 +1,19 @@
+{
+  "name": "aircraft-battle",
+  "version": "1.0.0",
+  "description": "人机对战飞机大战游戏",
+  "type": "module",
+  "scripts": {
+    "start": "vite",
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "keywords": ["game", "aircraft", "battle"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.3.3",
+    "vite": "^5.0.10"
+  }
+}
