@@ -10,22 +10,45 @@ interface LaserEmitterState {
 }
 
 export class LaserBoss extends Boss {
-  private readonly emitterSpawnInterval = 2000;
-  private readonly emitterShootInterval = 400;
-  private readonly emitterRotateStepDeg = 125;
-  private readonly emitterMoveSpeed = 2.4;
-  private readonly emitterOutOfBoundsGrace = 300;
+  // Configurable parameters (adjustable by skill intensity)
+  private emitterSpawnInterval = 2000; // ms between emitter pairs
+  private emitterShootInterval = 400; // ms between emitter bursts
+  private emitterRotateStepDeg = 125; // deg step after each shot
+  private emitterMoveSpeed = 2.4; // px per update step
+  private emitterOutOfBoundsGrace = 300; // ms grace after leaving screen
 
-  private readonly laserSpeedPxPerSecond = 300;
-  private readonly laserLengthPx = 140;
-  private readonly laserThicknessPx = 8;
-  private readonly laserLifetimeMs = 2200;
+  private laserSpeedPxPerSecond = 300;
+  private laserLengthPx = 140;
+  private laserThicknessPx = 8;
+  private laserLifetimeMs = 2200;
 
   private lastEmitterSpawnTime = 0;
   private emitters: LaserEmitterState[] = [];
 
   constructor(x: number, y: number, side: PlayerSide) {
     super(x, y, side, 125);
+  }
+
+  // Configure boss behavior according to skill level (2/3/4)
+  public setSkillIntensity(level: number) {
+    if (level === 2) {
+      this.emitterSpawnInterval = 2000;
+      this.emitterShootInterval = 400;
+      this.emitterMoveSpeed = 2.4;
+      this.laserLifetimeMs = 2200;
+    } else if (level === 3) {
+      // Skill3: laser duration doubled relative to skill2
+      this.emitterSpawnInterval = 2000;
+      this.emitterShootInterval = 400;
+      this.emitterMoveSpeed = 2.4;
+      this.laserLifetimeMs = 2200 * 2;
+    } else if (level === 4) {
+      // Skill4: more aggressive emitter cadence
+      this.emitterSpawnInterval = 1200;
+      this.emitterShootInterval = 350;
+      this.emitterMoveSpeed = 3.2;
+      this.laserLifetimeMs = 2200;
+    }
   }
 
   protected override onUpdate(_deltaTime: number, game: Game): void {
@@ -76,7 +99,12 @@ export class LaserBoss extends Boss {
     );
 
     emitterBullet.configureOutOfBoundsGracePeriod(this.emitterOutOfBoundsGrace);
-    game.addBullet(emitterBullet);
+    const tokenId = this.getSkillLifecycleId();
+    if (typeof tokenId === 'number') {
+      game.addSkillBullet(emitterBullet, tokenId);
+    } else {
+      game.addBullet(emitterBullet);
+    }
 
     this.emitters.push({
       bullet: emitterBullet,
@@ -118,7 +146,12 @@ export class LaserBoss extends Boss {
       this.laserLifetimeMs
     );
 
-    game.addBullet(laserBullet);
+    const tokenId = this.getSkillLifecycleId();
+    if (typeof tokenId === 'number') {
+      game.addSkillBullet(laserBullet, tokenId);
+    } else {
+      game.addBullet(laserBullet);
+    }
   }
 
   private normalizeAngleDeg(angleDeg: number): number {

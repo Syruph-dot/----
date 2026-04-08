@@ -3,6 +3,8 @@ import { Bullet } from './Bullet';
 import { ChargeSystem } from '../systems/ChargeSystem';
 import { ComboSystem } from '../systems/ComboSystem';
 import { PlayerSide, AircraftType } from '../entities/types';
+import { getAircraftProfile } from './aircraft';
+import { AircraftProfile } from './aircraft/types';
 
 export class Player {
   x: number;
@@ -25,12 +27,14 @@ export class Player {
   private readonly hitboxRadius = 4;
   
   private side: PlayerSide;
-  private aircraftType: AircraftType;
+  private readonly aircraftProfile: AircraftProfile;
   private chargeSystem: ChargeSystem;
   private comboSystem: ComboSystem;
   
   private isCharging = false;
   private chargeStartTime = 0;
+  private chargeKeyHeld = false;
+  private chargeKeyDownTime = 0;
   private lastShootTime = 0;
   private readonly shootCooldown = 100;
   private readonly hurtDurationMs = 1000;
@@ -66,7 +70,7 @@ export class Player {
     this.side = side;
     this.chargeSystem = chargeSystem;
     this.comboSystem = comboSystem;
-    this.aircraftType = aircraftType;
+    this.aircraftProfile = getAircraftProfile(aircraftType);
     this.svgRoot = svgRoot;
 
     if (this.svgRoot) {
@@ -156,7 +160,11 @@ export class Player {
 
     this.constrainToScreen(game);
     
-    if (this.isCharging) {
+    if (this.chargeKeyHeld && !this.isCharging && !game.isSkillLifecycleActive(this.side)) {
+      this.beginCharging();
+    }
+
+    if (this.isCharging && !game.isSkillLifecycleActive(this.side)) {
       this.chargeSystem.addChargeFromHold(deltaTime);
     }
   }
@@ -249,28 +257,44 @@ export class Player {
   }
 
   private getPalette() {
-    if (this.aircraftType === 'laser') {
-      return this.side === 'left'
-        ? { stroke: '#9cff6e', glow: 'rgba(156, 255, 110, 0.34)', fill: 'rgba(10, 18, 30, 0.96)' }
-        : { stroke: '#ffd166', glow: 'rgba(255, 209, 102, 0.34)', fill: 'rgba(10, 18, 30, 0.96)' };
-    }
-
-    if (this.aircraftType === 'tracking') {
-      return this.side === 'left'
-        ? { stroke: '#ffd166', glow: 'rgba(255, 209, 102, 0.34)', fill: 'rgba(10, 18, 30, 0.96)' }
-        : { stroke: '#b88cff', glow: 'rgba(184, 140, 255, 0.34)', fill: 'rgba(10, 18, 30, 0.96)' };
-    }
-
-    return this.side === 'left'
-      ? { stroke: '#59f0ff', glow: 'rgba(89, 240, 255, 0.34)', fill: 'rgba(10, 18, 30, 0.96)' }
-      : { stroke: '#ff6f8e', glow: 'rgba(255, 111, 142, 0.34)', fill: 'rgba(10, 18, 30, 0.96)' };
+    return this.aircraftProfile.getPalette(this.side);
   }
   
-  startCharging() {
+  private beginCharging() {
     if (this.isCharging) return;
     this.isCharging = true;
     this.chargeStartTime = Date.now();
     this.chargeSystem.startCharging();
+  }
+
+  startCharging(game: Game) {
+    if (this.isCharging || game.isSkillLifecycleActive(this.side)) return;
+    this.beginCharging();
+  }
+
+  onChargeKeyDown(game: Game) {
+    this.chargeKeyHeld = true;
+    this.chargeKeyDownTime = Date.now();
+    if (!game.isSkillLifecycleActive(this.side)) {
+      this.beginCharging();
+    }
+  }
+
+  onChargeKeyUp(game: Game): string {
+    const holdDuration = this.chargeKeyDownTime > 0 ? Date.now() - this.chargeKeyDownTime : 0;
+    this.chargeKeyHeld = false;
+    this.chargeKeyDownTime = 0;
+
+    if (this.isCharging) {
+      return this.releaseCharge(game);
+    }
+
+    if (holdDuration > 0 && holdDuration < 160) {
+      this.shoot(game);
+      return 'shoot';
+    }
+
+    return 'none';
   }
   
   releaseCharge(game: Game) {
@@ -299,7 +323,8 @@ export class Player {
     }
     // Level 1 should not consume accumulated gauge; fire immediately.
     if (level === 1) {
-      this.useLevel1Skill(game);
+      const skillTokenId = game.beginSkillLifecycle(this.side);
+      this.useLevel1Skill(game, skillTokenId);
       return 'skill1';
     }
 
@@ -309,11 +334,12 @@ export class Player {
       const cost = level === 2 ? thresholds.level2 : thresholds.level3;
       const ok = this.chargeSystem.consumeCharge(cost);
       if (ok) {
+        const skillTokenId = game.beginSkillLifecycle(this.side);
         if (level === 2) {
-          this.useLevel2Skill(game);
+          this.useLevel2Skill(game, skillTokenId);
           return 'skill2';
         } else {
-          this.useLevel3Skill(game);
+          this.useLevel3Skill(game, skillTokenId);
           return 'skill3';
         }
       }
@@ -326,7 +352,8 @@ export class Player {
   // level: 1..4 for charge-based skills. Returns true if executed.
   executeSkill(level: number, game: Game): boolean {
     if (level === 1) {
-      this.useLevel1Skill(game);
+      const skillTokenId = game.beginSkillLifecycle(this.side);
+      this.useLevel1Skill(game, skillTokenId);
       return true;
     }
 
@@ -335,8 +362,9 @@ export class Player {
       const cost = level === 2 ? thresholds.level2 : thresholds.level3;
       const ok = this.chargeSystem.consumeCharge(cost);
       if (ok) {
-        if (level === 2) this.useLevel2Skill(game);
-        else this.useLevel3Skill(game);
+        const skillTokenId = game.beginSkillLifecycle(this.side);
+        if (level === 2) this.useLevel2Skill(game, skillTokenId);
+        else this.useLevel3Skill(game, skillTokenId);
         return true;
       }
       return false;
@@ -368,74 +396,32 @@ export class Player {
     };
   }
 
-  private useBaseAdvancedAttack(game: Game) {
-    this.useLevel1Skill(game);
+  private useBaseAdvancedAttack(game: Game, skillTokenId?: number) {
+    this.useLevel1Skill(game, skillTokenId);
   }
   
-  private useLevel1Skill(game: Game) {
-    const category = this.side === 'left' ? 'player1' : 'player2';
-    switch (this.aircraftType) {
-      case 'scatter':
-        for (let i = -2; i <= 2; i++) {
-          const bullet = new Bullet(
-            this.x + this.width / 2,
-            this.y,
-            i * 2,
-            -10,
-            category,
-            'special',
-            false,
-            20,
-            20,
-            10,
-            this.side
-          );
-          game.addBullet(bullet);
-        }
-        break;
-      case 'laser':
-        const laser = new Bullet(
-          this.x + this.width / 2,
-          this.y,
-          0,
-          0,
-          category,
-          'special',
-          false,
-          10,
-          10,
-          10,
-          this.side
-        );
-        // 激光：端点跟随自机位置，持续 1.5s，每 0.4s 重置命中缓存以允许再次伤害
-        if ((laser as any).startLaser) {
-          (laser as any).startLaser(this, 1500, 400, 10);
-        }
-        game.addBullet(laser);
-        break;
-      case 'tracking':
-        for (let i = 0; i < 3; i++) {
-          const missile = new Bullet(
-            this.x + this.width / 2 + (i - 1) * 20,
-            this.y,
-            0,
-            -8,
-            category,
-            'special',
-            false,
-            4,
-            10,
-            10,
-            this.side
-          );
-          game.addBullet(missile);
-        }
-        break;
+  private useLevel1Skill(game: Game, skillTokenId?: number) {
+    const addBullet = (bullet: Bullet) => {
+      if (typeof skillTokenId === 'number') {
+        game.addSkillBullet(bullet, skillTokenId);
+      } else {
+        game.addBullet(bullet);
+      }
+    };
+    this.aircraftProfile.useLevel1Skill({
+      player: this,
+      game,
+      skillTokenId,
+      addBullet,
+    });
+  }
+  
+  private useLevel2Skill(game: Game, skillTokenId?: number) {
+    if (this.aircraftProfile.handleLevel2Skill?.({ player: this, game, skillTokenId, addBullet: (bullet) => game.addBullet(bullet) })) {
+      return;
     }
-  }
-  
-  private useLevel2Skill(game: Game) {
-    this.useBaseAdvancedAttack(game);
+
+    this.useBaseAdvancedAttack(game, skillTokenId);
 
     const targetSide = this.side === 'left' ? 'right' : 'left';
     // trigger field on caster's own side (not the opponent)
@@ -464,8 +450,12 @@ export class Player {
     }
   }
   
-  private useLevel3Skill(game: Game) {
-    this.useBaseAdvancedAttack(game);
+  private useLevel3Skill(game: Game, skillTokenId?: number) {
+    if (this.aircraftProfile.handleLevel3Skill?.({ player: this, game, skillTokenId, addBullet: (bullet) => game.addBullet(bullet) })) {
+      return;
+    }
+
+    this.useBaseAdvancedAttack(game, skillTokenId);
 
     const targetSide = this.side === 'left' ? 'right' : 'left';
     // trigger field on caster's own side (not the opponent)
@@ -494,20 +484,28 @@ export class Player {
     }
   }
   
-  private useLevel4Skill(game: Game) {
-    this.useBaseAdvancedAttack(game);
+  private useLevel4Skill(game: Game, skillTokenId?: number) {
+    if (this.aircraftProfile.handleLevel4Skill?.({ player: this, game, skillTokenId, addBullet: (bullet) => game.addBullet(bullet) })) {
+      return;
+    }
+
+    this.useBaseAdvancedAttack(game, skillTokenId);
 
     const targetSide = this.side === 'left' ? 'right' : 'left';
     // trigger field on caster's own side (not the opponent)
-    game.triggerExpandingField(this.side, this.side, 1);
+    if (typeof skillTokenId === 'number') {
+      game.attachSkillField(this.side, this.side, 1, 1000, skillTokenId);
+    } else {
+      game.triggerExpandingField(this.side, this.side, 1);
+    }
     
     const boss = game.getBoss();
     if (boss && boss.side === targetSide) {
-      this.useLevel3Skill(game);
+      this.useLevel3Skill(game, skillTokenId);
       return;
     }
     
-    game.triggerBoss(targetSide);
+    game.triggerBoss(targetSide, 'scatter');
   }
   
   useBomb(game: Game) {
@@ -524,15 +522,11 @@ export class Player {
     const boss = game.getBoss();
     if (boss && boss.side !== this.side) {
       const damage = boss.maxHealth * 0.75;
-      if (typeof console !== 'undefined') {
-        console.debug('[Player] bomb on boss', { caster: this.side, damage, bossHealthBefore: boss.health });
-      }
+      // logging disabled: bomb on boss
       boss.health -= damage;
-      if (typeof console !== 'undefined') {
-        console.debug('[Player] boss health after bomb', { bossHealth: boss.health });
-      }
+      // logging disabled: boss health after bomb
       if (boss.health <= 0) {
-        if (typeof console !== 'undefined') console.warn('[Player] boss killed by bomb', { caster: this.side });
+        // logging disabled: boss killed by bomb
         game.removeBoss();
       }
     }
@@ -636,6 +630,8 @@ export class Player {
     this.knockbackBaseVy = 0;
     this.lowHpGaugeBoostUsed = false;
     this.isCharging = false;
+    this.chargeKeyHeld = false;
+    this.chargeKeyDownTime = 0;
   }
 
   private isInHurtState(): boolean {

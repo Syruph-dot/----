@@ -10,9 +10,9 @@ export class ScatterBoss extends Boss {
   private phase1ToggleCounter = 0;
   private phase1CanBeDestroyed = true;
   private phase1BaseAngleDeg = (Math.random() - 0.5) * 12;
-  private readonly phase1BurstInterval = 100; // ms between bursts in phase 1
+  private readonly phase1BurstInterval = 120; // ms between bursts in phase 1
   private readonly phase1BurstSize = 8;
-  private readonly phase1MaxBullets = 320;
+  private readonly phase1MaxBullets = 160;
   private readonly phase1SpreadDeg = 90;
   private readonly phase1BaseSpeed = 2.2;
 
@@ -71,18 +71,11 @@ export class ScatterBoss extends Boss {
     const startY = this.y + this.height;
     const halfSpread = this.phase1SpreadDeg / 2;
     const baseAngleDeg = this.phase1BaseAngleDeg;
-    const targetPlayer = game.getPlayer(this.side);
-    const targetAngleDeg = targetPlayer
-      ? (Math.atan2((targetPlayer.x + targetPlayer.width / 2) - startX, (targetPlayer.y + targetPlayer.height / 2) - startY) * 180) / Math.PI
-      : 0;
-    const aimOffsetDeg = 16;
 
     for (let i = 0; i < this.phase1BurstSize; i++) {
       const progress = i / (this.phase1BurstSize - 1);
       const spreadAngleDeg = baseAngleDeg - halfSpread + progress * this.phase1SpreadDeg;
-      const angleDeg = Math.random() < 0.33
-        ? targetAngleDeg + (Math.random() * (aimOffsetDeg * 2) - aimOffsetDeg)
-        : spreadAngleDeg;
+      const angleDeg = spreadAngleDeg;
       const angleRad = (angleDeg * Math.PI) / 180;
       const vx = Math.sin(angleRad) * this.phase1BaseSpeed;
       const vy = Math.cos(angleRad) * this.phase1BaseSpeed;
@@ -112,17 +105,8 @@ export class ScatterBoss extends Boss {
       this.phase1ToggleCounter = 0;
     }
 
-    if (typeof console !== 'undefined') {
-      console.debug('[ScatterBoss] phase1 burst', {
-        side: this.side,
-        bullets: this.phase1BurstSize,
-        totalBullets: this.phase1BulletsFired,
-        baseAngleDeg,
-        canBeDestroyed: this.phase1CanBeDestroyed,
-      });
-    }
-    // advance base angle for next burst
-    this.phase1BaseAngleDeg += 123;
+    // logging disabled: phase1 burst
+    // keep `phase1BaseAngleDeg` constant during the phase (randomized on phase start)
   }
 
   private enterPhase2() {
@@ -148,10 +132,7 @@ export class ScatterBoss extends Boss {
         this.side
       );
       game.addBullet(bullet);
-      // debug
-      if (typeof console !== 'undefined') {
-        console.debug('[ScatterBoss] legacy scatter shot', { side: this.side, x: this.x, y: this.y, i });
-      }
+      // logging disabled: legacy scatter shot
     }
   }
 

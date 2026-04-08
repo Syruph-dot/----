@@ -231,7 +231,7 @@ export class AIController {
       if (this.postActionCooldownMs > 0) {
         return 'none';
       }
-      this.player.startCharging();
+      this.player.startCharging(this.game);
       this.charging = true;
       this.chargeHoldMs = 0;
       this.chargingTargetLevel = targetLevel;
@@ -510,29 +510,30 @@ export class AIController {
   private computeBulletThreat(bullet: Bullet, playerRect: Rect): number {
     const lookAheadFrames = this.profile.lookAheadFrames;
     let softThreat = 0;
+    const projector = (bullet as any).getProjectedThreatRect;
 
     for (let frame = 1; frame <= lookAheadFrames; frame++) {
-      const projectedX = bullet.x + bullet.vx * frame;
-      const projectedY = bullet.y + bullet.vy * frame;
-      const bulletRect = {
-        x: projectedX,
-        y: projectedY,
-        width: bullet.width,
-        height: bullet.height,
-      };
+      const bulletRect = typeof projector === 'function'
+        ? projector.call(bullet, frame, 1000 / 60)
+        : {
+            x: bullet.x + bullet.vx * frame,
+            y: bullet.y + bullet.vy * frame,
+            width: bullet.width,
+            height: bullet.height,
+          };
 
       if (this.rectsOverlap(bulletRect, playerRect)) {
         return 1 + ((lookAheadFrames - frame + 1) / lookAheadFrames);
       }
 
       const horizontalGap = Math.max(
-        playerRect.x - (projectedX + bullet.width),
-        projectedX - (playerRect.x + playerRect.width),
+        playerRect.x - (bulletRect.x + bulletRect.width),
+        bulletRect.x - (playerRect.x + playerRect.width),
         0,
       );
       const verticalGap = Math.max(
-        playerRect.y - (projectedY + bullet.height),
-        projectedY - (playerRect.y + playerRect.height),
+        playerRect.y - (bulletRect.y + bulletRect.height),
+        bulletRect.y - (playerRect.y + playerRect.height),
         0,
       );
 

@@ -1,7 +1,7 @@
 export class ComboSystem {
   private combo = 0;
   private comboTimer = 0;
-  private readonly comboTimeout = 3000;
+  private readonly comboTimeout = 1200;
   
   getCombo(): number {
     return this.combo;

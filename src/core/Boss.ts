@@ -4,8 +4,8 @@ import { PlayerSide } from '../entities/types';
 export abstract class Boss {
   x: number;
   y: number;
-  width = 80;
-  height = 80;
+  width = 200;
+  height = 200;
   health: number;
   maxHealth: number;
   active = true;
@@ -13,6 +13,7 @@ export abstract class Boss {
   side: PlayerSide;
   protected speed = 2;
   protected moveDirection = 1;
+  private skillLifecycleId: number | null = null;
 
   constructor(x: number, y: number, side: PlayerSide, maxHealth = 125) {
     this.x = x;
@@ -44,6 +45,18 @@ export abstract class Boss {
 
   protected onUpdate(_deltaTime: number, _game: Game): void {
     // override in subclasses for per-boss firing logic
+  }
+
+  attachSkillLifecycle(skillLifecycleId: number) {
+    this.skillLifecycleId = skillLifecycleId;
+  }
+
+  getSkillLifecycleId(): number | null {
+    return this.skillLifecycleId;
+  }
+
+  clearSkillLifecycleId() {
+    this.skillLifecycleId = null;
   }
 
   render(ctx: CanvasRenderingContext2D) {

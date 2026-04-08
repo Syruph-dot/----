@@ -63,6 +63,7 @@ export class Bullet {
   private segmentHeadY = 0;
   private segmentTailX = 0;
   private segmentTailY = 0;
+  private skillLifecycleId: number | null = null;
 
   constructor(x: number, y: number, vx: number, vy: number,
               category: BulletCategory, bulletType: BulletType,
@@ -267,6 +268,75 @@ export class Bullet {
     }
 
     return now - this.outOfBoundsSince >= this.outOfBoundsGracePeriod;
+  }
+
+  attachSkillLifecycle(skillLifecycleId: number) {
+    this.skillLifecycleId = skillLifecycleId;
+  }
+
+  getSkillLifecycleId(): number | null {
+    return this.skillLifecycleId;
+  }
+
+  clearSkillLifecycleId() {
+    this.skillLifecycleId = null;
+  }
+
+  getProjectedThreatRect(frame: number, frameDurationMs = 1000 / 60): { x: number; y: number; width: number; height: number } {
+    if (this.isSegmentLaser) {
+      const elapsedMs = this.segmentElapsedMs + frame * frameDurationMs;
+      const headDistance = this.segmentSpeedPxPerSecond * (elapsedMs / 1000);
+      const tailElapsed = Math.max(0, elapsedMs - this.segmentTailDelayMs);
+      const tailDistance = this.segmentSpeedPxPerSecond * (tailElapsed / 1000);
+
+      const headX = this.segmentOriginX + this.segmentDirX * headDistance;
+      const headY = this.segmentOriginY + this.segmentDirY * headDistance;
+      const tailX = this.segmentOriginX + this.segmentDirX * tailDistance;
+      const tailY = this.segmentOriginY + this.segmentDirY * tailDistance;
+
+      const minX = Math.min(headX, tailX);
+      const maxX = Math.max(headX, tailX);
+      const minY = Math.min(headY, tailY);
+      const maxY = Math.max(headY, tailY);
+      const halfThickness = this.segmentThicknessPx / 2;
+
+      return {
+        x: minX - halfThickness,
+        y: minY - halfThickness,
+        width: Math.max(this.segmentThicknessPx, maxX - minX + this.segmentThicknessPx),
+        height: Math.max(this.segmentThicknessPx, maxY - minY + this.segmentThicknessPx),
+      };
+    }
+
+    if (this.isLaser) {
+      if (!this.followTarget) {
+        return { x: this.x, y: this.y, width: this.width, height: this.height };
+      }
+
+      const centerX = this.followTarget.x + this.followTarget.width / 2;
+      const centerY = this.followTarget.y + this.followTarget.height / 2;
+      const width = this.width;
+      const y = this.laserOrigin === 'top'
+        ? -10
+        : Math.max(0, Math.min(centerY, this.laserOriginY - 4));
+      const height = this.laserOrigin === 'top'
+        ? Math.max(4, centerY - y)
+        : Math.max(4, this.laserOriginY - centerY);
+
+      return {
+        x: this.laserFollowX ? centerX - width / 2 : this.x,
+        y,
+        width,
+        height,
+      };
+    }
+
+    return {
+      x: this.x + this.vx * frame,
+      y: this.y + this.vy * frame,
+      width: this.width,
+      height: this.height,
+    };
   }
 
   isTransferringState(): boolean {

@@ -19,6 +19,14 @@ type ExpandingField = {
   elapsed: number;
   duration: number;
   targetRadius: number;
+  skillTokenId?: number;
+};
+
+type SkillLifecycle = {
+  id: number;
+  side: PlayerSide;
+  activeEntities: number;
+  pendingCallbacks: number;
 };
 
 export class Game {
@@ -56,6 +64,9 @@ export class Game {
   private readonly keyUpListener = (e: KeyboardEvent) => this.handleKeyUp(e);
   private readonly managedTimeoutIds = new Set<number>();
   private listenersAttached = false;
+  private nextSkillLifecycleId = 1;
+  private skillLifecycles = new Map<number, SkillLifecycle>();
+  private activeSkillLifecycleBySide: Record<PlayerSide, number | null> = { left: null, right: null };
   
   private readonly SCREEN_WIDTH: number;
   private readonly SCREEN_HEIGHT: number;
@@ -134,14 +145,7 @@ export class Game {
       this.aiController = new AIController(this, this.player2, 'right', this.aiDifficulty);
     }
     
-    console.log('[Game] constructed', {
-      mode: this.gameMode,
-      difficulty: this.aiDifficulty,
-      screenWidth: this.SCREEN_WIDTH,
-      screenHeight: this.SCREEN_HEIGHT,
-      player1Health: this.player1.health,
-      player2Health: this.player2 ? this.player2.health : null
-    });
+    // logging disabled
   }
   
   start() {
@@ -190,6 +194,8 @@ export class Game {
     this.bullets = [];
     this.boss = null;
     this.expandingFields = [];
+    this.skillLifecycles.clear();
+    this.activeSkillLifecycleBySide = { left: null, right: null };
 
     // Recreate wave system and AI controller to reset internal counters
     this.waveSystem = new WaveSystem(this);
@@ -207,7 +213,8 @@ export class Game {
 
   // Append a training event to in-memory buffer. Lightweight and safe to call frequently.
   pushTrainingEvent(ev: any) {
-    this.trainingEvents.push(ev);
+    // Training/event recording disabled per user request — no-op
+    void ev;
   }
 
   getTrainingEventsJSONL(): string {
@@ -327,6 +334,8 @@ export class Game {
       clearTimeout(timeoutId);
     }
     this.managedTimeoutIds.clear();
+    this.skillLifecycles.clear();
+    this.activeSkillLifecycleBySide = { left: null, right: null };
     this.removeEventListeners();
 
     if (this.svgOverlay && this.svgOverlay.parentElement) {
@@ -350,6 +359,90 @@ export class Game {
 
     this.managedTimeoutIds.add(timeoutId);
     return timeoutId;
+  }
+
+  beginSkillLifecycle(side: PlayerSide): number {
+    const id = this.nextSkillLifecycleId++;
+    this.skillLifecycles.set(id, {
+      id,
+      side,
+      activeEntities: 0,
+      pendingCallbacks: 0,
+    });
+    this.activeSkillLifecycleBySide[side] = id;
+    return id;
+  }
+
+  isSkillLifecycleActive(side: PlayerSide): boolean {
+    const id = this.activeSkillLifecycleBySide[side];
+    return id !== null && this.skillLifecycles.has(id);
+  }
+
+  scheduleSkillLifecycleCallback(tokenId: number, callback: () => void, delayMs: number): number {
+    const lifecycle = this.skillLifecycles.get(tokenId);
+    if (!lifecycle) {
+      return this.runWithLifecycle(callback, delayMs);
+    }
+
+    lifecycle.pendingCallbacks += 1;
+    return this.runWithLifecycle(() => {
+      try {
+        callback();
+      } finally {
+        lifecycle.pendingCallbacks = Math.max(0, lifecycle.pendingCallbacks - 1);
+        this.tryCompleteSkillLifecycle(tokenId);
+      }
+    }, delayMs);
+  }
+
+  addSkillBullet(bullet: Bullet, tokenId: number) {
+    bullet.attachSkillLifecycle(tokenId);
+    this.registerSkillEntity(tokenId);
+    this.addBullet(bullet);
+  }
+
+  attachSkillBoss(boss: Boss, tokenId: number) {
+    boss.attachSkillLifecycle(tokenId);
+    this.registerSkillEntity(tokenId);
+  }
+
+  attachSkillField(targetSide: PlayerSide, ownerSide: PlayerSide, radiusRatio: number, durationMs: number, tokenId: number) {
+    this.triggerExpandingField(targetSide, ownerSide, radiusRatio, durationMs, tokenId);
+  }
+
+  completeSkillEntity(tokenId: number) {
+    const lifecycle = this.skillLifecycles.get(tokenId);
+    if (!lifecycle) {
+      return;
+    }
+
+    lifecycle.activeEntities = Math.max(0, lifecycle.activeEntities - 1);
+    this.tryCompleteSkillLifecycle(tokenId);
+  }
+
+  private registerSkillEntity(tokenId: number) {
+    const lifecycle = this.skillLifecycles.get(tokenId);
+    if (!lifecycle) {
+      return;
+    }
+
+    lifecycle.activeEntities += 1;
+  }
+
+  private tryCompleteSkillLifecycle(tokenId: number) {
+    const lifecycle = this.skillLifecycles.get(tokenId);
+    if (!lifecycle) {
+      return;
+    }
+
+    if (lifecycle.activeEntities > 0 || lifecycle.pendingCallbacks > 0) {
+      return;
+    }
+
+    this.skillLifecycles.delete(tokenId);
+    if (this.activeSkillLifecycleBySide[lifecycle.side] === tokenId) {
+      this.activeSkillLifecycleBySide[lifecycle.side] = null;
+    }
   }
   
   private gameLoop(currentTime: number) {
@@ -403,6 +496,14 @@ export class Game {
     for (let bullet of this.bullets) {
       bullet.update(deltaTime);
 
+      if (!bullet.active && typeof bullet.getSkillLifecycleId === 'function') {
+        const tokenId = bullet.getSkillLifecycleId();
+        if (tokenId !== null) {
+          bullet.clearSkillLifecycleId();
+          this.completeSkillEntity(tokenId);
+        }
+      }
+
       if (bullet.active && !bullet.isTransferringState() && this.shouldCullBullet(bullet)) {
         bullet.active = false;
       }
@@ -411,11 +512,26 @@ export class Game {
     if (this.boss) {
       this.boss.update(deltaTime, this);
       if (!this.boss.active) {
+        const tokenId = this.boss.getSkillLifecycleId();
+        if (tokenId !== null) {
+          this.boss.clearSkillLifecycleId();
+          this.completeSkillEntity(tokenId);
+        }
         this.boss = null;
       }
     }
     
     this.checkCollisions();
+
+    for (const bullet of this.bullets) {
+      if (!bullet.active && typeof bullet.getSkillLifecycleId === 'function') {
+        const tokenId = bullet.getSkillLifecycleId();
+        if (tokenId !== null) {
+          bullet.clearSkillLifecycleId();
+          this.completeSkillEntity(tokenId);
+        }
+      }
+    }
     
     this.comboSystem1.update(deltaTime);
     if (this.comboSystem2) {
@@ -757,8 +873,6 @@ export class Game {
         const dy = by - field.y;
         if (dx * dx + dy * dy <= radiusSq) {
           bullet.active = false;
-          // 标记为力场消除，避免这些子弹被计入蓄力（或后续转移计分）
-          (bullet as any).destroyedByExpandingField = true;
         }
       }
 
@@ -774,6 +888,13 @@ export class Game {
         if (dx * dx + dy * dy <= radiusSq) {
           enemy.active = false;
         }
+      }
+    }
+
+    const expiredFields = this.expandingFields.filter((field) => field.elapsed >= field.duration);
+    for (const field of expiredFields) {
+      if (typeof field.skillTokenId === 'number') {
+        this.completeSkillEntity(field.skillTokenId);
       }
     }
 
@@ -805,7 +926,7 @@ export class Game {
     }
   }
 
-  triggerExpandingField(targetSide: PlayerSide, ownerSide: PlayerSide, radiusRatio: number, durationMs = 1000) {
+  triggerExpandingField(targetSide: PlayerSide, ownerSide: PlayerSide, radiusRatio: number, durationMs = 1000, skillTokenId?: number) {
     const viewport = this.getSideViewport(targetSide);
     const targetPlayer = this.getPlayer(targetSide);
     const centerX = targetPlayer ? targetPlayer.x + targetPlayer.width / 2 : viewport.x + viewport.width / 2;
@@ -821,7 +942,12 @@ export class Game {
       elapsed: 0,
       duration: Math.max(1, durationMs),
       targetRadius,
+      skillTokenId,
     });
+
+    if (typeof skillTokenId === 'number') {
+      this.registerSkillEntity(skillTokenId);
+    }
   }
   
   private checkCollisions() {
@@ -875,26 +1001,12 @@ export class Game {
           }
 
           if (this.isColliding(bullet, this.boss)) {
-                const beforeHealth = this.boss.health;
-                if (typeof console !== 'undefined') {
-                  console.debug('[Game] boss hit attempt', {
-                    source: 'bullet',
-                    category: bullet.category,
-                    bulletSide: bullet.side,
-                    bulletType: bullet.bulletType,
-                    damage: bullet.damage,
-                    bx: bullet.x,
-                    by: bullet.y,
-                    ts: Date.now(),
-                  });
-                }
+                // logging disabled: boss hit attempt
 
                 bullet.markHit(this.boss);
                 this.boss.health -= bullet.damage;
 
-                if (typeof console !== 'undefined') {
-                  console.debug('[Game] boss health changed', { before: beforeHealth, after: this.boss.health });
-                }
+                // logging disabled: boss health changed
 
                 if (bullet.bulletType === 'normal') {
                   bullet.active = false;
@@ -902,9 +1014,7 @@ export class Game {
 
                 if (this.boss.health <= 0) {
                   const bossSide = this.boss.side;
-                  if (typeof console !== 'undefined') {
-                    console.warn('[Game] boss killed', { side: bossSide, killer: bullet.category, damage: bullet.damage, ts: Date.now() });
-                  }
+                  // logging disabled: boss killed
                   this.removeBoss();
                   this.onBossKilled(bossSide);
                 }
@@ -986,8 +1096,7 @@ export class Game {
       // 每个击杀基础增量为 1，根据当前连击应用倍率（>20 -> x2, >10 -> x1.5）
       const combo1 = this.comboSystem1.getCombo();
       const mult1 = combo1 > 20 ? 2 : combo1 > 10 ? 1.5 : 1;
-      // 将基础击杀加成从 1 调整到 0.7，以减缓早期过快蓄力
-      this.chargeSystem1.addCharge(0.7 * mult1);
+      this.chargeSystem1.addCharge(1 * mult1);
       
       if (this.comboSystem1.getCombo() >= 30) {
         this.triggerBoss('right');
@@ -997,7 +1106,7 @@ export class Game {
       this.comboSystem2.increment();
       const combo2 = this.comboSystem2.getCombo();
       const mult2 = combo2 > 20 ? 2 : combo2 > 10 ? 1.5 : 1;
-      this.chargeSystem2.addCharge(0.7 * mult2);
+      this.chargeSystem2.addCharge(1 * mult2);
       
       if (this.comboSystem2.getCombo() >= 30) {
         this.triggerBoss('left');
@@ -1054,21 +1163,16 @@ export class Game {
           : this.SCREEN_WIDTH * 0.55 + Math.random() * (this.SCREEN_WIDTH * 0.45);
         const targetY = Math.random() * (this.SCREEN_HEIGHT * 0.4);
         b.startTransfer(targetX, targetY, 750, targetCategory, targetSide, aimTarget);
-        // 每传送一个子弹，给予触发该爆炸（也即击杀方）基础蓄力（下调至 0.7），并按连击倍率加成
-        // 但如果该子弹是被扩张力场直接消掉的，则不计入蓄力
-        if ((b as any).destroyedByExpandingField) {
-          return;
-        }
-
+        // 每传送一个子弹，给予触发该爆炸（也即击杀方）1 点基础蓄力，并按连击倍率加成
         if (side === 'left') {
           const combo1 = this.comboSystem1.getCombo();
           const mult1 = combo1 > 20 ? 2 : combo1 > 10 ? 1.5 : 1;
-          this.chargeSystem1.addCharge(0.7 * mult1);
+          this.chargeSystem1.addCharge(1 * mult1);
         } else {
           if (this.chargeSystem2 && this.comboSystem2) {
             const combo2 = this.comboSystem2.getCombo();
             const mult2 = combo2 > 20 ? 2 : combo2 > 10 ? 1.5 : 1;
-            this.chargeSystem2.addCharge(0.7 * mult2);
+            this.chargeSystem2.addCharge(1 * mult2);
           }
         }
       });
@@ -1131,9 +1235,9 @@ export class Game {
     }
   }
   
-  triggerBoss(side: PlayerSide, aircraftType: AircraftType = 'scatter') {
+  triggerBoss(side: PlayerSide, aircraftType: AircraftType = 'scatter', skillTokenId?: number) {
     if (this.boss) {
-      this.boss = null;
+      this.removeBoss();
     }
 
     const bossX = side === 'left'
@@ -1154,9 +1258,20 @@ export class Game {
         this.boss = new ScatterBoss(bossX, 100, side);
         break;
     }
+
+    if (this.boss && typeof skillTokenId === 'number') {
+      this.attachSkillBoss(this.boss, skillTokenId);
+    }
   }
 
   removeBoss() {
+    if (this.boss) {
+      const tokenId = this.boss.getSkillLifecycleId();
+      if (tokenId !== null) {
+        this.boss.clearSkillLifecycleId();
+        this.completeSkillEntity(tokenId);
+      }
+    }
     this.boss = null;
   }
   
@@ -1240,7 +1355,7 @@ export class Game {
   }
 
   private updateGameOverState() {
-    console.log('[Game] updateGameOverState check', { gameOver: this.gameOver, player1Health: this.player1?.health, player2Health: this.player2 ? this.player2.health : null });
+    // logging disabled
 
     if (this.gameOver) {
       return;
@@ -1249,27 +1364,21 @@ export class Game {
     if (this.player1.health <= 0 && this.player2 && this.player2.health <= 0) {
       this.gameOver = true;
       this.winnerText = '平局';
-      try {
-        this.downloadTrainingEvents('jsonl');
-      } catch (_) {}
+      // auto-download removed per user request
       return;
     }
 
     if (this.player1.health <= 0) {
       this.gameOver = true;
       this.winnerText = this.gameMode === 'single' ? 'AI 获胜' : '右侧玩家获胜';
-      try {
-        this.downloadTrainingEvents('jsonl');
-      } catch (_) {}
+      // auto-download removed per user request
       return;
     }
 
     if (this.player2 && this.player2.health <= 0) {
       this.gameOver = true;
       this.winnerText = '左侧玩家获胜';
-      try {
-        this.downloadTrainingEvents('jsonl');
-      } catch (_) {}
+      // auto-download removed per user request
     }
   }
 
@@ -1316,7 +1425,7 @@ export class Game {
       case 'z':
       case 'Z':
         if (e.repeat) break;
-        this.player1.startCharging();
+        this.player1.onChargeKeyDown(this);
         break;
       case 'x':
       case 'X':
@@ -1350,7 +1459,7 @@ export class Game {
         case 'j':
         case 'J':
           if (e.repeat) break;
-          this.player2.startCharging();
+          this.player2.onChargeKeyDown(this);
           break;
         case 'k':
         case 'K':
@@ -1376,7 +1485,7 @@ export class Game {
         break;
       case 'z':
       case 'Z':
-        this.player1.releaseCharge(this);
+        this.player1.onChargeKeyUp(this);
         break;
       case 'Shift':
         if (this.gameMode === 'single') {
@@ -1405,7 +1514,7 @@ export class Game {
           break;
         case 'j':
         case 'J':
-          this.player2.releaseCharge(this);
+          this.player2.onChargeKeyUp(this);
           break;
       }
     }
