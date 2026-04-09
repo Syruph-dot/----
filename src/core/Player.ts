@@ -42,6 +42,9 @@ export class Player {
   private knockbackBaseVx = 0;
   private knockbackBaseVy = 0;
   private lowHpGaugeBoostUsed = false;
+  // 在发动技能后阻止玩家立即开始蓄力的时间戳（ms since epoch）。
+  // 当 Date.now() < skillChargeBlockUntil 时禁止开始/累积蓄力；阻断默认 0（不阻断）。
+  private skillChargeBlockUntil = 0;
   
   // rotation (degrees) and simple P-controller target
   private angle = 0; // current angle in degrees
@@ -161,11 +164,12 @@ export class Player {
 
     this.constrainToScreen(game);
     
-    if (this.chargeKeyHeld && !this.isCharging && !game.isSkillLifecycleActive(this.side)) {
+    // 仅在技能阻断期结束后允许开始/累积蓄力（阻断期由发动技能时设置，长度为 1s）
+    if (this.chargeKeyHeld && !this.isCharging && Date.now() >= this.skillChargeBlockUntil) {
       this.beginCharging();
     }
 
-    if (this.isCharging && !game.isSkillLifecycleActive(this.side)) {
+    if (this.isCharging && Date.now() >= this.skillChargeBlockUntil) {
       this.chargeSystem.addChargeFromHold(deltaTime);
     }
   }
@@ -270,14 +274,18 @@ export class Player {
   }
 
   startCharging(game: Game) {
-    if (this.isCharging || game.isSkillLifecycleActive(this.side)) return;
+    // keep parameter for API compatibility
+    void game;
+    if (this.isCharging || Date.now() < this.skillChargeBlockUntil) return;
     this.beginCharging();
   }
 
   onChargeKeyDown(game: Game) {
+    // keep parameter for API compatibility
+    void game;
     this.chargeKeyHeld = true;
     this.chargeKeyDownTime = Date.now();
-    if (!game.isSkillLifecycleActive(this.side)) {
+    if (Date.now() >= this.skillChargeBlockUntil) {
       this.beginCharging();
     }
   }
@@ -319,6 +327,8 @@ export class Player {
       const ok = this.chargeSystem.consumeCharge(cost);
       if (ok) {
         this.useLevel4Skill(game);
+        // 阻断短时间内再次开始蓄力（1s）
+        this.skillChargeBlockUntil = Date.now() + 1000;
         return 'skill4';
       }
       return 'none';
@@ -327,6 +337,8 @@ export class Player {
     if (level === 1) {
       const skillTokenId = game.beginSkillLifecycle(this.side);
       this.useLevel1Skill(game, skillTokenId);
+      // 阻断短时间内再次开始蓄力（1s）
+      this.skillChargeBlockUntil = Date.now() + 1000;
       return 'skill1';
     }
 
@@ -339,9 +351,11 @@ export class Player {
         const skillTokenId = game.beginSkillLifecycle(this.side);
         if (level === 2) {
           this.useLevel2Skill(game, skillTokenId);
+          this.skillChargeBlockUntil = Date.now() + 1000;
           return 'skill2';
         } else {
           this.useLevel3Skill(game, skillTokenId);
+          this.skillChargeBlockUntil = Date.now() + 1000;
           return 'skill3';
         }
       }
@@ -356,6 +370,7 @@ export class Player {
     if (level === 1) {
       const skillTokenId = game.beginSkillLifecycle(this.side);
       this.useLevel1Skill(game, skillTokenId);
+      this.skillChargeBlockUntil = Date.now() + 1000;
       return true;
     }
 
@@ -367,6 +382,7 @@ export class Player {
         const skillTokenId = game.beginSkillLifecycle(this.side);
         if (level === 2) this.useLevel2Skill(game, skillTokenId);
         else this.useLevel3Skill(game, skillTokenId);
+        this.skillChargeBlockUntil = Date.now() + 1000;
         return true;
       }
       return false;
@@ -377,6 +393,7 @@ export class Player {
       const ok = this.chargeSystem.consumeCharge(cost);
       if (ok) {
         this.useLevel4Skill(game);
+        this.skillChargeBlockUntil = Date.now() + 1000;
         return true;
       }
       return false;
@@ -549,22 +566,23 @@ export class Player {
 
     this.lastShootTime = currentTime;
 
-    const category = this.side === 'left' ? 'player1' : 'player2';
-    const bullet = new Bullet(
-      this.x + this.width / 2 - 2,
-      this.y,
-      0,
-      -10,
-      category,
-      'normal',
-      false,
-      4,
-      10,
-      2,
-      this.side
-    );
+    this.aircraftProfile.useNormalAttack({
+      player: this,
+      game,
+      aimDirectionDeg: this.getNormalAttackDirectionDeg(),
+      addBullet: (bullet) => game.addBullet(bullet),
+    });
+  }
 
-    game.addBullet(bullet);
+  private getNormalAttackDirectionDeg(): number {
+    // 0° is down in this project, 180° is up.
+    if (this.movingLeft && !this.movingRight) {
+      return 217;
+    }
+    if (this.movingRight && !this.movingLeft) {
+      return 143;
+    }
+    return 180;
   }
   
   getSide(): PlayerSide {

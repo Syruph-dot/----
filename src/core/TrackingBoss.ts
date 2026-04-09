@@ -1,7 +1,7 @@
 import { Boss } from './Boss';
-import { Bullet } from './Bullet';
 import { Game } from './Game';
 import { PlayerSide } from '../entities/types';
+import { emitPatternBullets } from './bullets/patternEmitter';
 
 export class TrackingBoss extends Boss {
   private lastShootTime = 0;
@@ -20,19 +20,24 @@ export class TrackingBoss extends Boss {
   }
 
   private shootTracking(game: Game) {
-    const bullet = new Bullet(
-      this.x + this.width / 2,
-      this.y + this.height,
-      (Math.random() - 0.5) * 2,
-      5,
-      'barrage',
-      'normal',
-      true,
-      4,
-      10,
-      10,
-      this.side
+    emitPatternBullets(
+      {
+        kind: 'single',
+        directionDeg: Math.random() * 22 - 11,
+        speed: 5,
+      },
+      {
+        originX: this.x + this.width / 2,
+        originY: this.y + this.height,
+        side: this.side,
+        category: 'barrage',
+        bulletType: 'normal',
+        canBeDestroyed: true,
+        width: 4,
+        height: 10,
+        damage: 10,
+      },
+      (bullet) => game.addBullet(bullet)
     );
-    game.addBullet(bullet);
   }
 }

@@ -1,6 +1,12 @@
 import { Game } from './Game';
-import { Bullet } from './Bullet';
 import { PlayerSide } from '../entities/types';
+import { emitPatternBullets } from './bullets/patternEmitter';
+
+const ENEMY_POLYGON_POINTS: Array<[number, number]> = [
+  [0, -34], [22, -20], [34, 0], [22, 20], [0, 34], [-22, 20], [-34, 0], [-22, -20],
+];
+
+export type EnemyCollisionPoint = { x: number; y: number };
 
 export class Enemy {
   x: number;
@@ -53,16 +59,12 @@ export class Enemy {
     ctx.shadowBlur = 12;
 
     ctx.fillStyle = 'rgba(8, 13, 26, 0.95)';
-    this.drawPolygon(ctx, [
-      [0, -34], [22, -20], [34, 0], [22, 20], [0, 34], [-22, 20], [-34, 0], [-22, -20],
-    ]);
+    this.drawPolygon(ctx, ENEMY_POLYGON_POINTS);
     ctx.fill();
 
     ctx.strokeStyle = accent;
     ctx.lineWidth = 2;
-    this.drawPolygon(ctx, [
-      [0, -34], [22, -20], [34, 0], [22, 20], [0, 34], [-22, 20], [-34, 0], [-22, -20],
-    ]);
+    this.drawPolygon(ctx, ENEMY_POLYGON_POINTS);
     ctx.stroke();
 
     ctx.fillStyle = accentSoft;
@@ -93,25 +95,36 @@ export class Enemy {
     ctx.fillRect(this.x + 14, this.y - 12, (this.width - 28) * Math.max(0, this.health / Math.max(1, this.maxHealth)), 4);
     ctx.restore();
   }
+
+  getCollisionPolygon(): EnemyCollisionPoint[] {
+    const cx = this.x + this.width / 2;
+    const cy = this.y + this.height / 2;
+    return ENEMY_POLYGON_POINTS.map(([px, py]) => ({
+      x: cx + px,
+      y: cy + py,
+    }));
+  }
   
   private shoot(game: Game) {
-    // 限定随机散射角为向下 ±37°（保持向下且不超过 37°）
-    const maxAngleDeg = 37;
-    const spreadAngle = (Math.random() * (maxAngleDeg * 2) - maxAngleDeg) * (Math.PI / 180);
-    const speed = 5;
-    const bullet = new Bullet(
-      this.x + this.width / 2 - 2,
-      this.y + this.height,
-      Math.sin(spreadAngle) * speed,
-      Math.cos(spreadAngle) * speed,
-      'barrage',
-      'normal',
-      true,
-      4, 10, 10,
-      this.side
+    emitPatternBullets(
+      {
+        kind: 'single',
+        directionDeg: Math.random() * 74 - 37,
+        speed: 5,
+      },
+      {
+        originX: this.x + this.width / 2 - 2,
+        originY: this.y + this.height,
+        side: this.side,
+        category: 'barrage',
+        bulletType: 'normal',
+        canBeDestroyed: true,
+        width: 4,
+        height: 10,
+        damage: 10,
+      },
+      (bullet) => game.addBullet(bullet)
     );
-
-    game.addBullet(bullet);
   }
 
   private drawPolygon(ctx: CanvasRenderingContext2D, points: Array<[number, number]>) {

@@ -2,6 +2,7 @@ import { Boss } from './Boss';
 import { Bullet } from './Bullet';
 import { Game } from './Game';
 import { PlayerSide } from '../entities/types';
+import { createBulletFromSpawnSpec } from './bullets/patternEmitter';
 
 interface LaserEmitterState {
   bullet: Bullet;
@@ -80,23 +81,19 @@ export class LaserBoss extends Boss {
   }
 
   private spawnEmitter(game: Game, angleDeg: number, now: number) {
-    const angleRad = (angleDeg * Math.PI) / 180;
-    const vx = Math.sin(angleRad) * this.emitterMoveSpeed;
-    const vy = Math.cos(angleRad) * this.emitterMoveSpeed;
-
-    const emitterBullet = new Bullet(
-      this.x + this.width / 2 - 5,
-      this.y + this.height / 2 - 5,
-      vx,
-      vy,
-      'barrage',
-      'special',
-      false,
-      8,
-      8,
-      0,
-      this.side
-    );
+    const emitterBullet = createBulletFromSpawnSpec({
+      x: this.x + this.width / 2 - 5,
+      y: this.y + this.height / 2 - 5,
+      directionDeg: angleDeg,
+      speed: this.emitterMoveSpeed,
+      side: this.side,
+      category: 'barrage',
+      bulletType: 'special',
+      canBeDestroyed: false,
+      width: 8,
+      height: 8,
+      damage: 0,
+    });
 
     emitterBullet.configureOutOfBoundsGracePeriod(this.emitterOutOfBoundsGrace);
     const tokenId = this.getSkillLifecycleId();
@@ -138,10 +135,18 @@ export class LaserBoss extends Boss {
       this.side
     );
 
-    laserBullet.startSegmentLaser(
+    // 使用可反弹段激光并传入该发射器所属半屏的边界
+    const viewport = game.getSideViewport(emitterBullet.side);
+    laserBullet.startBouncingSegmentLaser(
       angleDeg,
       this.laserSpeedPxPerSecond,
       this.laserLengthPx,
+      {
+        minX: viewport.x,
+        maxX: viewport.x + viewport.width,
+        minY: viewport.y,
+        maxY: viewport.y + viewport.height,
+      },
       this.laserThicknessPx,
       this.laserLifetimeMs
     );

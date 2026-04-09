@@ -1,7 +1,7 @@
 import { Boss } from './Boss';
-import { Bullet } from './Bullet';
 import { Game } from './Game';
 import { PlayerSide } from '../entities/types';
+import { emitPatternBullets } from './bullets/patternEmitter';
 
 export class ScatterBoss extends Boss {
   private scatterPhase: 1 | 2 = 1;
@@ -69,33 +69,30 @@ export class ScatterBoss extends Boss {
   private firePhase1Burst(game: Game) {
     const startX = this.x + this.width / 2;
     const startY = this.y + this.height;
-    const halfSpread = this.phase1SpreadDeg / 2;
     const baseAngleDeg = this.phase1BaseAngleDeg;
 
-    for (let i = 0; i < this.phase1BurstSize; i++) {
-      const progress = i / (this.phase1BurstSize - 1);
-      const spreadAngleDeg = baseAngleDeg - halfSpread + progress * this.phase1SpreadDeg;
-      const angleDeg = spreadAngleDeg;
-      const angleRad = (angleDeg * Math.PI) / 180;
-      const vx = Math.sin(angleRad) * this.phase1BaseSpeed;
-      const vy = Math.cos(angleRad) * this.phase1BaseSpeed;
-
-      const bullet = new Bullet(
-        startX,
-        startY,
-        vx,
-        vy,
-        'barrage',
-        'normal',
-        this.phase1CanBeDestroyed,
-        4,
-        10,
-        10,
-        this.side
-      );
-
-      game.addBullet(bullet);
-    }
+    emitPatternBullets(
+      {
+        kind: 'fan',
+        count: this.phase1BurstSize,
+        centerDirectionDeg: baseAngleDeg,
+        angleRangeDeg: this.phase1SpreadDeg,
+        baseSpeed: this.phase1BaseSpeed,
+        shape: 'circle',
+      },
+      {
+        originX: startX,
+        originY: startY,
+        side: this.side,
+        category: 'barrage',
+        bulletType: 'normal',
+        canBeDestroyed: this.phase1CanBeDestroyed,
+        width: 4,
+        height: 10,
+        damage: 10,
+      },
+      (bullet) => game.addBullet(bullet)
+    );
 
     this.phase1BulletsFired += this.phase1BurstSize;
     this.phase1ToggleCounter += this.phase1BurstSize;
@@ -117,51 +114,30 @@ export class ScatterBoss extends Boss {
   }
 
   private shootScatterLegacy(game: Game) {
-    for (let i = -2; i <= 2; i++) {
-      const bullet = new Bullet(
-        this.x + this.width / 2,
-        this.y + this.height,
-        i * 1.5,
-        4,
-        'barrage',
-        'normal',
-        true,
-        4,
-        10,
-        10,
-        this.side
-      );
-      game.addBullet(bullet);
-      const bullet2 = new Bullet(
-        this.x + this.width / 2,
-        this.y + this.height,
-        i * 1.5/4*5,
-        5,
-        'barrage',
-        'normal',
-        true,
-        4,
-        10,
-        10,
-        this.side
-      );
-      game.addBullet(bullet2);
-      const bullet3 = new Bullet(
-        this.x + this.width / 2,
-        this.y + this.height,
-        i * 1.5/4*5.5,
-        5.5,
-        'barrage',
-        'normal',
-        true,
-        4,
-        10,
-        10,
-        this.side
-      );
-      game.addBullet(bullet3);
-      // logging disabled: legacy scatter shot
-    }
+    const centerX = this.x + this.width / 2;
+    const originY = this.y + this.height;
+    emitPatternBullets(
+      {
+        kind: 'composite',
+        patterns: [
+          { kind: 'fan', count: 5, centerDirectionDeg: 0, angleRangeDeg: 58, baseSpeed: 4.25, shape: 'circle' },
+          { kind: 'fan', count: 5, centerDirectionDeg: 0, angleRangeDeg: 74, baseSpeed: 5.35, shape: 'circle' },
+          { kind: 'fan', count: 5, centerDirectionDeg: 0, angleRangeDeg: 80, baseSpeed: 5.9, shape: 'circle' },
+        ],
+      },
+      {
+        originX: centerX,
+        originY,
+        side: this.side,
+        category: 'barrage',
+        bulletType: 'normal',
+        canBeDestroyed: true,
+        width: 4,
+        height: 10,
+        damage: 10,
+      },
+      (bullet) => game.addBullet(bullet)
+    );
   }
 
   private resetToPhase1() {

@@ -28,6 +28,8 @@ export class Bullet {
   private startX = 0;
   private startY = 0;
   private postTransferAimTarget: { x: number; y: number } | null = null;
+  // 可选的传送缓动方式（用于光球先快后慢）
+  private transferEasing: 'linear' | 'easeOutQuad' = 'linear';
 
   // Laser-specific state: 持续型激光，跟随一个目标（通常是发射者），持续若干毫秒，并按间隔重置命中记录以允许重复受击
   private isLaser = false;
@@ -37,6 +39,15 @@ export class Bullet {
   private followTarget: { x: number; y: number; width: number; height: number } | null = null;
   // 报警 / 预警标记（用于在屏幕上闪烁提示，不造成伤害）
   isWarning = false;
+  // 如果设置为数字（0..1），渲染预警时使用该固定 alpha，
+  // 否则回退到默认的脉动效果。
+  warningAlpha?: number;
+  // 标记此子弹应以圆形光球形式渲染（用于 Skill3 之类的效果）
+  isCircular = false;
+  // 支持基于时间的预警淡入（用于光球到达后逐渐显示预警）
+  private warningDurationMs = 0;
+  private warningElapsedMs = 0;
+  private warningTargetAlpha = 0.5;
   // 激光扩展方向与参数
   private laserOrigin: 'top' | 'bottom' = 'top';
   private laserOriginY = -10; // 对于 bottom-origin 的激光，设置起点 Y
@@ -63,6 +74,20 @@ export class Bullet {
   private segmentHeadY = 0;
   private segmentTailX = 0;
   private segmentTailY = 0;
+  private segmentState: 'normal' | 'wait-tail-at-bounce' | 'wait-gap-after-bounce' | 'post-bounce-follow' = 'normal';
+  private segmentHeadPostBounceDistancePx = 0;
+  private segmentTailPostBounceDistancePx = 0;
+  private segmentBounceEnabled = false;
+  private segmentHasBounced = false;
+  private segmentBounds: { minX: number; maxX: number; minY: number; maxY: number } | null = null;
+  private segmentBouncePointX = 0;
+  private segmentBouncePointY = 0;
+  private segmentHeadDistanceAtBouncePx = 0;
+  private segmentTailDistanceAtBouncePx = 0;
+  private segmentPreBounceDirX = 0;
+  private segmentPreBounceDirY = 1;
+  private segmentPostBounceDirX = 0;
+  private segmentPostBounceDirY = 1;
   private skillLifecycleId: number | null = null;
 
   constructor(x: number, y: number, vx: number, vy: number,
@@ -91,6 +116,12 @@ export class Bullet {
   }
 
   update(deltaTime: number) {
+    // 处理预警淡入
+    if (this.isWarning && this.warningDurationMs > 0) {
+      this.warningElapsedMs += deltaTime;
+      const t = Math.max(0, Math.min(1, this.warningElapsedMs / this.warningDurationMs));
+      this.warningAlpha = Math.min(this.warningTargetAlpha, t * this.warningTargetAlpha);
+    }
     if (this.isTransferring) {
       this.transferTime += deltaTime;
 
@@ -120,37 +151,17 @@ export class Bullet {
         this.vy = Math.cos(angle) * speed;
         this.postTransferAimTarget = null;
       } else {
-        const progress = this.transferTime / this.transferDuration;
+        const p = this.transferTime / this.transferDuration;
+        let progress = p;
+        if (this.transferEasing === 'easeOutQuad') {
+          progress = 1 - (1 - p) * (1 - p);
+        }
         this.x = this.startX + (this.targetX - this.startX) * progress;
         this.y = this.startY + (this.targetY - this.startY) * progress;
       }
     } else {
       if (this.isSegmentLaser) {
-        this.segmentElapsedMs += deltaTime;
-
-        const headDistance = this.segmentSpeedPxPerSecond * (this.segmentElapsedMs / 1000);
-        const tailElapsed = Math.max(0, this.segmentElapsedMs - this.segmentTailDelayMs);
-        const tailDistance = this.segmentSpeedPxPerSecond * (tailElapsed / 1000);
-
-        this.segmentHeadX = this.segmentOriginX + this.segmentDirX * headDistance;
-        this.segmentHeadY = this.segmentOriginY + this.segmentDirY * headDistance;
-        this.segmentTailX = this.segmentOriginX + this.segmentDirX * tailDistance;
-        this.segmentTailY = this.segmentOriginY + this.segmentDirY * tailDistance;
-
-        const minX = Math.min(this.segmentHeadX, this.segmentTailX);
-        const maxX = Math.max(this.segmentHeadX, this.segmentTailX);
-        const minY = Math.min(this.segmentHeadY, this.segmentTailY);
-        const maxY = Math.max(this.segmentHeadY, this.segmentTailY);
-        const halfThickness = this.segmentThicknessPx / 2;
-
-        this.x = minX - halfThickness;
-        this.y = minY - halfThickness;
-        this.width = Math.max(this.segmentThicknessPx, maxX - minX + this.segmentThicknessPx);
-        this.height = Math.max(this.segmentThicknessPx, maxY - minY + this.segmentThicknessPx);
-
-        if (this.segmentElapsedMs >= this.segmentLifetimeMs) {
-          this.active = false;
-        }
+        this.updateSegmentLaser(deltaTime);
       } else if (this.isLaser) {
         // 激光每帧更新计时器并跟随发射者位置（可选择是否跟随 X），激光可以从顶部或底部延伸到目标中心位置
         this.laserElapsed += deltaTime;
@@ -226,6 +237,10 @@ export class Bullet {
     this.segmentOriginY = this.y;
     this.segmentDirX = Math.sin(angleRad);
     this.segmentDirY = Math.cos(angleRad);
+    this.segmentPreBounceDirX = this.segmentDirX;
+    this.segmentPreBounceDirY = this.segmentDirY;
+    this.segmentPostBounceDirX = this.segmentDirX;
+    this.segmentPostBounceDirY = this.segmentDirY;
     this.segmentSpeedPxPerSecond = Math.max(1, speedPxPerSecond);
     this.segmentLengthPx = Math.max(1, lengthPx);
     this.segmentTailDelayMs = (this.segmentLengthPx / this.segmentSpeedPxPerSecond) * 1000;
@@ -237,6 +252,16 @@ export class Bullet {
     this.segmentHeadY = this.segmentOriginY;
     this.segmentTailX = this.segmentOriginX;
     this.segmentTailY = this.segmentOriginY;
+    this.segmentState = 'normal';
+    this.segmentHeadPostBounceDistancePx = 0;
+    this.segmentTailPostBounceDistancePx = 0;
+    this.segmentBounceEnabled = false;
+    this.segmentHasBounced = false;
+    this.segmentBounds = null;
+    this.segmentBouncePointX = this.segmentOriginX;
+    this.segmentBouncePointY = this.segmentOriginY;
+    this.segmentHeadDistanceAtBouncePx = 0;
+    this.segmentTailDistanceAtBouncePx = 0;
 
     this.vx = 0;
     this.vy = 0;
@@ -244,6 +269,23 @@ export class Bullet {
     this.height = this.segmentThicknessPx;
     this.active = true;
     this.clearHitTargets();
+  }
+
+  startBouncingSegmentLaser(
+    angleDeg: number,
+    speedPxPerSecond: number,
+    lengthPx: number,
+    bounds: { minX: number; maxX: number; minY: number; maxY: number },
+    thicknessPx = 8,
+    lifetimeMs = 2200
+  ) {
+    this.startSegmentLaser(angleDeg, speedPxPerSecond, lengthPx, thicknessPx, lifetimeMs);
+    this.segmentBounceEnabled = true;
+    this.segmentBounds = bounds;
+  }
+
+  isBeamLike(): boolean {
+    return this.isLaser || this.isSegmentLaser;
   }
 
   configureOutOfBoundsGracePeriod(graceMs: number) {
@@ -280,6 +322,229 @@ export class Bullet {
 
   clearSkillLifecycleId() {
     this.skillLifecycleId = null;
+  }
+
+  private updateSegmentLaser(deltaTime: number) {
+    this.segmentElapsedMs += deltaTime;
+    if (this.segmentElapsedMs >= this.segmentLifetimeMs) {
+      this.active = false;
+      return;
+    }
+
+    const stepDistance = this.segmentSpeedPxPerSecond * (Math.max(0, deltaTime) / 1000);
+
+    // 仅在“未启用反弹”或“无边界”时走直线模式。
+    // 已发生反弹后仍需继续执行反弹状态机（wait-tail / wait-gap / post-bounce-follow）。
+    if (!this.segmentBounceEnabled || !this.segmentBounds) {
+      const headDistance = this.segmentSpeedPxPerSecond * (this.segmentElapsedMs / 1000);
+      const tailElapsed = Math.max(0, this.segmentElapsedMs - this.segmentTailDelayMs);
+      const tailDistance = this.segmentSpeedPxPerSecond * (tailElapsed / 1000);
+
+      this.segmentHeadX = this.segmentOriginX + this.segmentDirX * headDistance;
+      this.segmentHeadY = this.segmentOriginY + this.segmentDirY * headDistance;
+      this.segmentTailX = this.segmentOriginX + this.segmentDirX * tailDistance;
+      this.segmentTailY = this.segmentOriginY + this.segmentDirY * tailDistance;
+
+      this.updateSegmentBoundsRect();
+      return;
+    }
+
+    if (this.segmentState === 'normal') {
+      const headDistance = this.segmentSpeedPxPerSecond * (this.segmentElapsedMs / 1000);
+      const tailElapsed = Math.max(0, this.segmentElapsedMs - this.segmentTailDelayMs);
+      const tailDistance = this.segmentSpeedPxPerSecond * (tailElapsed / 1000);
+
+      this.segmentHeadX = this.segmentOriginX + this.segmentDirX * headDistance;
+      this.segmentHeadY = this.segmentOriginY + this.segmentDirY * headDistance;
+      this.segmentTailX = this.segmentOriginX + this.segmentDirX * tailDistance;
+      this.segmentTailY = this.segmentOriginY + this.segmentDirY * tailDistance;
+
+      const bounced = this.tryStartSegmentBounce();
+      if (!bounced) {
+        this.updateSegmentBoundsRect();
+      }
+      return;
+    }
+
+    if (this.segmentState === 'wait-tail-at-bounce') {
+      this.segmentHeadX = this.segmentBouncePointX;
+      this.segmentHeadY = this.segmentBouncePointY;
+      this.segmentTailDistanceAtBouncePx += stepDistance;
+
+      const tailDistance = Math.min(this.segmentTailDistanceAtBouncePx, this.segmentHeadDistanceAtBouncePx);
+      this.segmentTailX = this.segmentOriginX + this.segmentPreBounceDirX * tailDistance;
+      this.segmentTailY = this.segmentOriginY + this.segmentPreBounceDirY * tailDistance;
+
+      if (tailDistance >= this.segmentHeadDistanceAtBouncePx - 0.001) {
+        this.segmentTailX = this.segmentBouncePointX;
+        this.segmentTailY = this.segmentBouncePointY;
+        this.segmentState = 'wait-gap-after-bounce';
+        this.segmentHeadPostBounceDistancePx = 0;
+      }
+
+      this.updateSegmentBoundsRect();
+      return;
+    }
+
+    if (this.segmentState === 'wait-gap-after-bounce') {
+      this.segmentHeadPostBounceDistancePx += stepDistance;
+      this.segmentHeadX = this.segmentBouncePointX + this.segmentPostBounceDirX * this.segmentHeadPostBounceDistancePx;
+      this.segmentHeadY = this.segmentBouncePointY + this.segmentPostBounceDirY * this.segmentHeadPostBounceDistancePx;
+      this.segmentTailX = this.segmentBouncePointX;
+      this.segmentTailY = this.segmentBouncePointY;
+
+      if (this.segmentHeadPostBounceDistancePx >= this.segmentLengthPx) {
+        this.segmentState = 'post-bounce-follow';
+        this.segmentHeadPostBounceDistancePx = this.segmentLengthPx;
+        this.segmentTailPostBounceDistancePx = 0;
+        this.segmentHeadX = this.segmentBouncePointX + this.segmentPostBounceDirX * this.segmentHeadPostBounceDistancePx;
+        this.segmentHeadY = this.segmentBouncePointY + this.segmentPostBounceDirY * this.segmentHeadPostBounceDistancePx;
+      }
+
+      this.updateSegmentBoundsRect();
+      return;
+    }
+
+    this.segmentHeadPostBounceDistancePx += stepDistance;
+    this.segmentTailPostBounceDistancePx += stepDistance;
+    this.segmentHeadX = this.segmentBouncePointX + this.segmentPostBounceDirX * this.segmentHeadPostBounceDistancePx;
+    this.segmentHeadY = this.segmentBouncePointY + this.segmentPostBounceDirY * this.segmentHeadPostBounceDistancePx;
+    this.segmentTailX = this.segmentBouncePointX + this.segmentPostBounceDirX * this.segmentTailPostBounceDistancePx;
+    this.segmentTailY = this.segmentBouncePointY + this.segmentPostBounceDirY * this.segmentTailPostBounceDistancePx;
+    this.updateSegmentBoundsRect();
+  }
+
+  private tryStartSegmentBounce(): boolean {
+    if (!this.segmentBounds || !this.segmentBounceEnabled || this.segmentHasBounced) {
+      return false;
+    }
+
+    const bounced = this.resolveSegmentEdgeBounce(this.segmentHeadX, this.segmentHeadY, this.segmentBounds);
+    if (!bounced) {
+      return false;
+    }
+
+    const { x, y, dirX, dirY } = bounced;
+    return this.beginSegmentBounce(x, y, dirX, dirY);
+  }
+
+  private beginSegmentBounce(
+    bouncePointX: number,
+    bouncePointY: number,
+    postBounceDirX: number,
+    postBounceDirY: number
+  ): boolean {
+    if (!this.segmentBounds || !this.segmentBounceEnabled || this.segmentHasBounced) {
+      return false;
+    }
+
+    const postLength = Math.hypot(postBounceDirX, postBounceDirY);
+    if (postLength <= 0.0001) {
+      return false;
+    }
+
+    this.segmentHasBounced = true;
+    this.segmentState = 'wait-tail-at-bounce';
+    this.segmentBouncePointX = bouncePointX;
+    this.segmentBouncePointY = bouncePointY;
+    this.segmentHeadDistanceAtBouncePx = Math.hypot(
+      this.segmentBouncePointX - this.segmentOriginX,
+      this.segmentBouncePointY - this.segmentOriginY
+    );
+    this.segmentTailDistanceAtBouncePx = Math.hypot(
+      this.segmentTailX - this.segmentOriginX,
+      this.segmentTailY - this.segmentOriginY
+    );
+    this.segmentPreBounceDirX = this.segmentDirX;
+    this.segmentPreBounceDirY = this.segmentDirY;
+    this.segmentPostBounceDirX = postBounceDirX / postLength;
+    this.segmentPostBounceDirY = postBounceDirY / postLength;
+    this.segmentHeadX = this.segmentBouncePointX;
+    this.segmentHeadY = this.segmentBouncePointY;
+    this.segmentTailX = this.segmentOriginX + this.segmentPreBounceDirX * this.segmentTailDistanceAtBouncePx;
+    this.segmentTailY = this.segmentOriginY + this.segmentPreBounceDirY * this.segmentTailDistanceAtBouncePx;
+
+    this.updateSegmentBoundsRect();
+    return true;
+  }
+
+  private resolveSegmentEdgeBounce(
+    headX: number,
+    headY: number,
+    bounds: { minX: number; maxX: number; minY: number; maxY: number }
+  ): { x: number; y: number; dirX: number; dirY: number } | null {
+    let x = headX;
+    let y = headY;
+    let dirX = this.segmentDirX;
+    let dirY = this.segmentDirY;
+    let touched = false;
+    // 只允许撞到左右边缘：上下边缘不触发反弹。
+    // 侧边边界用可见区域内的 y 值钉住，避免碰撞点落到视口外导致“看起来没有反弹”。
+    const clampY = (value: number) => Math.max(bounds.minY, Math.min(bounds.maxY, value));
+
+    if (x < bounds.minX || x > bounds.maxX) {
+      x = x < bounds.minX ? bounds.minX : bounds.maxX;
+      y = clampY(y);
+      dirX *= -1;
+      touched = true;
+    } else {
+      const originX = this.segmentOriginX;
+      const originY = this.segmentOriginY;
+
+      const headDx = headX - originX;
+      const headDy = headY - originY;
+      const headDistance = Math.hypot(headDx, headDy);
+      if (headDistance <= 0.0001 || Math.abs(this.segmentDirX) <= 1e-6) {
+        return null;
+      }
+
+      const dMin = (bounds.minX - originX) / this.segmentDirX;
+      if (dMin >= 0 && dMin <= headDistance) {
+        x = bounds.minX;
+        y = clampY(originY + this.segmentDirY * dMin);
+        dirX = -this.segmentDirX;
+        dirY = this.segmentDirY;
+        touched = true;
+      }
+
+      const dMax = (bounds.maxX - originX) / this.segmentDirX;
+      if (!touched && dMax >= 0 && dMax <= headDistance) {
+        x = bounds.maxX;
+        y = clampY(originY + this.segmentDirY * dMax);
+        dirX = -this.segmentDirX;
+        dirY = this.segmentDirY;
+        touched = true;
+      }
+
+      if (!touched) {
+        return null;
+      }
+    }
+
+    const length = Math.hypot(dirX, dirY);
+    if (length <= 0.0001) {
+      return null;
+    }
+
+    return {
+      x,
+      y,
+      dirX: dirX / length,
+      dirY: dirY / length,
+    };
+  }
+
+  private updateSegmentBoundsRect() {
+    const minX = Math.min(this.segmentHeadX, this.segmentTailX);
+    const maxX = Math.max(this.segmentHeadX, this.segmentTailX);
+    const minY = Math.min(this.segmentHeadY, this.segmentTailY);
+    const maxY = Math.max(this.segmentHeadY, this.segmentTailY);
+    const halfThickness = this.segmentThicknessPx / 2;
+
+    this.x = minX - halfThickness;
+    this.y = minY - halfThickness;
+    this.width = Math.max(this.segmentThicknessPx, maxX - minX + this.segmentThicknessPx);
+    this.height = Math.max(this.segmentThicknessPx, maxY - minY + this.segmentThicknessPx);
   }
 
   getProjectedThreatRect(frame: number, frameDurationMs = 1000 / 60): { x: number; y: number; width: number; height: number } {
@@ -368,10 +633,46 @@ export class Bullet {
       ctx.restore();
       return;
     }
+
+    // 圆形光球渲染分支（用于在对方屏幕生成的光球）
+    if (this.isCircular) {
+      const cx = this.x + this.width / 2;
+      const cy = this.y + this.height / 2;
+      const radius = Math.max(2, Math.min(200, Math.max(this.width, this.height) / 2));
+      const palette = this.getPalette();
+
+      // 轻微脉动效果
+      const pulse = 0.85 + 0.12 * Math.sin(Date.now() / 100);
+      ctx.globalAlpha = pulse;
+
+      ctx.shadowColor = palette.glow;
+      ctx.shadowBlur = Math.max(6, radius * 0.8);
+
+      const grad = ctx.createRadialGradient(cx, cy, Math.max(1, radius * 0.15), cx, cy, radius);
+      grad.addColorStop(0, palette.core);
+      grad.addColorStop(0.6, palette.edge);
+      grad.addColorStop(1, 'rgba(255,255,255,0.02)');
+
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = palette.edge;
+      ctx.lineWidth = Math.max(1, Math.floor(radius * 0.12));
+      ctx.stroke();
+
+      ctx.restore();
+      return;
+    }
     // 预警效果：在对方屏幕底部闪烁提示，不造成伤害
     if (this.isWarning) {
-      const pulse = 0.45 + 0.35 * Math.sin(Date.now() / 120);
-      ctx.globalAlpha = pulse;
+      if (typeof this.warningAlpha === 'number') {
+        ctx.globalAlpha = this.warningAlpha;
+      } else {
+        const pulse = 0.45 + 0.35 * Math.sin(Date.now() / 120);
+        ctx.globalAlpha = pulse;
+      }
       ctx.fillStyle = this.side === 'left' ? 'rgba(89, 240, 255, 0.95)' : 'rgba(255, 111, 142, 0.95)';
       // 绘制一个简单的底部矩形作为预警标记
       ctx.fillRect(this.x, this.y - this.height, this.width, this.height);
@@ -386,6 +687,18 @@ export class Bullet {
       ctx.shadowColor = 'rgba(255, 138, 110, 0.45)';
       ctx.shadowBlur = 10;
 
+      // 如果存在 segmentBounds，则在绘制前裁剪到该矩形，防止越过半屏边界绘制
+      let clipped = false;
+      if (this.segmentBounds) {
+        const sb = this.segmentBounds;
+        const half = this.segmentThicknessPx / 2;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(sb.minX - half, sb.minY - half, (sb.maxX - sb.minX) + this.segmentThicknessPx, (sb.maxY - sb.minY) + this.segmentThicknessPx);
+        ctx.clip();
+        clipped = true;
+      }
+
       ctx.beginPath();
       ctx.moveTo(this.segmentTailX, this.segmentTailY);
       ctx.lineTo(this.segmentHeadX, this.segmentHeadY);
@@ -395,6 +708,10 @@ export class Bullet {
       ctx.beginPath();
       ctx.arc(this.segmentHeadX, this.segmentHeadY, Math.max(2, this.segmentThicknessPx * 0.33), 0, Math.PI * 2);
       ctx.fill();
+
+      if (clipped) {
+        ctx.restore();
+      }
 
       ctx.restore();
       return;
@@ -458,7 +775,8 @@ export class Bullet {
     duration: number,
     _targetCategory: BulletCategory,
     targetSide: PlayerSide,
-    aimTarget?: { x: number; y: number }
+    aimTarget?: { x: number; y: number },
+    options?: { easing?: 'linear' | 'easeOutQuad' }
   ) {
     this.isTransferring = true;
     this.transferDuration = duration;
@@ -466,6 +784,7 @@ export class Bullet {
     this.targetY = targetY;
     this.startX = this.x;
     this.startY = this.y;
+    this.transferEasing = options?.easing ?? 'linear';
     // 保持原始类别（弹幕），不要把它变成玩家子弹，仍然移动到目标 side
     this.side = targetSide;
     this.active = true;
@@ -480,6 +799,15 @@ export class Bullet {
     // 重新初始化 WeakMap
     // @ts-ignore 私有字段重置
     this.hitTimestamps = new WeakMap<object, number>();
+  }
+
+  // 外部触发：开始一个时基的预警淡入。
+  startWarningRamp(durationMs: number, targetAlpha = 0.5) {
+    this.isWarning = true;
+    this.warningDurationMs = Math.max(0, Math.floor(durationMs));
+    this.warningElapsedMs = 0;
+    this.warningTargetAlpha = Math.max(0, Math.min(1, targetAlpha));
+    this.warningAlpha = 0;
   }
 
   private getPalette() {

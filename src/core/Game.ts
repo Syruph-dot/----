@@ -1279,7 +1279,7 @@ export class Game {
             continue;
           }
 
-          if (!this.isColliding(bullet, enemy)) {
+          if (!this.isCollidingWithEnemyShape(bullet, enemy)) {
             continue;
           }
 
@@ -1342,17 +1342,34 @@ export class Game {
         const targetPlayer = bullet.side === 'left' ? this.player1 : this.player2;
 
         if (targetPlayer && this.isCollidingWithPlayerHitbox(bullet, targetPlayer)) {
-            const tookDamage = targetPlayer.applyDamage(bullet.damage, this);
-            bullet.active = false;
-
-            // 被弹幕命中时清空该侧连击
-            if (tookDamage) {
-              const side = targetPlayer.getSide();
-              if (side === 'left') {
-                this.interruptCombo('left');
-              } else {
-                if (this.comboSystem2) {
-                  this.interruptCombo('right');
+            // 支持“持续激光”样式的弹幕（bulletType === 'special' 且 isLaser），
+            // 对目标执行带冷却的重复命中；普通弹幕仍为一次性命中。
+            if (bullet.bulletType === 'special' && typeof bullet.hasHit === 'function') {
+              if (!bullet.hasHit(targetPlayer)) {
+                bullet.markHit(targetPlayer);
+                const tookDamage = targetPlayer.applyDamage(bullet.damage, this);
+                if (tookDamage) {
+                  const side = targetPlayer.getSide();
+                  if (side === 'left') {
+                    this.interruptCombo('left');
+                  } else {
+                    if (this.comboSystem2) {
+                      this.interruptCombo('right');
+                    }
+                  }
+                }
+              }
+            } else {
+              const tookDamage = targetPlayer.applyDamage(bullet.damage, this);
+              bullet.active = false;
+              if (tookDamage) {
+                const side = targetPlayer.getSide();
+                if (side === 'left') {
+                  this.interruptCombo('left');
+                } else {
+                  if (this.comboSystem2) {
+                    this.interruptCombo('right');
+                  }
                 }
               }
             }
@@ -1367,7 +1384,7 @@ export class Game {
       const targetPlayer = this.player1;
       if (!targetPlayer) continue;
 
-      if (this.isCollidingWithPlayerHitbox(enemy, targetPlayer)) {
+      if (this.isCollidingEnemyWithPlayerShape(enemy, targetPlayer)) {
         const tookDamage = targetPlayer.applyDamage(enemyCollisionDamage, this);
         enemy.active = false;
 
@@ -1391,7 +1408,7 @@ export class Game {
       const targetPlayer = this.player2;
       if (!targetPlayer) continue;
 
-      if (this.isCollidingWithPlayerHitbox(enemy, targetPlayer)) {
+      if (this.isCollidingEnemyWithPlayerShape(enemy, targetPlayer)) {
         const tookDamage = targetPlayer.applyDamage(enemyCollisionDamage, this);
         enemy.active = false;
 
@@ -1412,6 +1429,13 @@ export class Game {
            a.y + a.height > b.y;
   }
 
+  private isCollidingWithEnemyShape(
+    rect: { x: number; y: number; width: number; height: number },
+    enemy: Enemy
+  ): boolean {
+    return this.isRectCollidingWithPolygon(rect, enemy.getCollisionPolygon());
+  }
+
   private isCollidingWithPlayerHitbox(
     a: { x: number; y: number; width: number; height: number },
     player: Player
@@ -1422,6 +1446,151 @@ export class Game {
     const dx = hitbox.x - nearestX;
     const dy = hitbox.y - nearestY;
     return dx * dx + dy * dy <= hitbox.radius * hitbox.radius;
+  }
+
+  private isCollidingEnemyWithPlayerShape(enemy: Enemy, player: Player): boolean {
+    const hitbox = player.getHitbox();
+    return this.isCircleCollidingWithPolygon(hitbox, enemy.getCollisionPolygon());
+  }
+
+  private isRectCollidingWithPolygon(
+    rect: { x: number; y: number; width: number; height: number },
+    polygon: Array<{ x: number; y: number }>
+  ): boolean {
+    const rectPoints = [
+      { x: rect.x, y: rect.y },
+      { x: rect.x + rect.width, y: rect.y },
+      { x: rect.x + rect.width, y: rect.y + rect.height },
+      { x: rect.x, y: rect.y + rect.height },
+    ];
+
+    for (const point of rectPoints) {
+      if (this.isPointInPolygon(point, polygon)) {
+        return true;
+      }
+    }
+
+    for (const point of polygon) {
+      if (
+        point.x >= rect.x &&
+        point.x <= rect.x + rect.width &&
+        point.y >= rect.y &&
+        point.y <= rect.y + rect.height
+      ) {
+        return true;
+      }
+    }
+
+    for (let i = 0; i < rectPoints.length; i++) {
+      const rectStart = rectPoints[i];
+      const rectEnd = rectPoints[(i + 1) % rectPoints.length];
+      for (let j = 0; j < polygon.length; j++) {
+        const polyStart = polygon[j];
+        const polyEnd = polygon[(j + 1) % polygon.length];
+        if (this.doLineSegmentsIntersect(rectStart, rectEnd, polyStart, polyEnd)) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  private isCircleCollidingWithPolygon(
+    circle: { x: number; y: number; radius: number },
+    polygon: Array<{ x: number; y: number }>
+  ): boolean {
+    if (this.isPointInPolygon({ x: circle.x, y: circle.y }, polygon)) {
+      return true;
+    }
+
+    const radiusSq = circle.radius * circle.radius;
+    for (let i = 0; i < polygon.length; i++) {
+      const start = polygon[i];
+      const end = polygon[(i + 1) % polygon.length];
+      const nearest = this.closestPointOnSegment(circle.x, circle.y, start.x, start.y, end.x, end.y);
+      const dx = circle.x - nearest.x;
+      const dy = circle.y - nearest.y;
+      if (dx * dx + dy * dy <= radiusSq) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private isPointInPolygon(point: { x: number; y: number }, polygon: Array<{ x: number; y: number }>): boolean {
+    let inside = false;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      const xi = polygon[i].x;
+      const yi = polygon[i].y;
+      const xj = polygon[j].x;
+      const yj = polygon[j].y;
+      const intersects = ((yi > point.y) !== (yj > point.y)) &&
+        (point.x < ((xj - xi) * (point.y - yi)) / ((yj - yi) || 1e-9) + xi);
+      if (intersects) {
+        inside = !inside;
+      }
+    }
+    return inside;
+  }
+
+  private doLineSegmentsIntersect(
+    a1: { x: number; y: number },
+    a2: { x: number; y: number },
+    b1: { x: number; y: number },
+    b2: { x: number; y: number }
+  ): boolean {
+    const orientation = (p: { x: number; y: number }, q: { x: number; y: number }, r: { x: number; y: number }) => {
+      const value = (q.y - p.y) * (r.x - q.x) - (q.x - p.x) * (r.y - q.y);
+      if (Math.abs(value) < 1e-9) {
+        return 0;
+      }
+      return value > 0 ? 1 : 2;
+    };
+
+    const onSegment = (p: { x: number; y: number }, q: { x: number; y: number }, r: { x: number; y: number }) => {
+      return q.x <= Math.max(p.x, r.x) + 1e-9 && q.x + 1e-9 >= Math.min(p.x, r.x) &&
+             q.y <= Math.max(p.y, r.y) + 1e-9 && q.y + 1e-9 >= Math.min(p.y, r.y);
+    };
+
+    const o1 = orientation(a1, a2, b1);
+    const o2 = orientation(a1, a2, b2);
+    const o3 = orientation(b1, b2, a1);
+    const o4 = orientation(b1, b2, a2);
+
+    if (o1 !== o2 && o3 !== o4) {
+      return true;
+    }
+
+    if (o1 === 0 && onSegment(a1, b1, a2)) return true;
+    if (o2 === 0 && onSegment(a1, b2, a2)) return true;
+    if (o3 === 0 && onSegment(b1, a1, b2)) return true;
+    if (o4 === 0 && onSegment(b1, a2, b2)) return true;
+
+    return false;
+  }
+
+  private closestPointOnSegment(
+    px: number,
+    py: number,
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number
+  ): { x: number; y: number } {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const lengthSq = dx * dx + dy * dy;
+    if (lengthSq <= 1e-9) {
+      return { x: x1, y: y1 };
+    }
+
+    const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / lengthSq));
+    return {
+      x: x1 + t * dx,
+      y: y1 + t * dy,
+    };
   }
   
   private onEnemyKilled(enemy: Enemy, side: PlayerSide) {
@@ -1616,6 +1785,10 @@ export class Game {
   }
 
   private shouldCullBullet(bullet: Bullet): boolean {
+    if (typeof bullet.isBeamLike === 'function' && bullet.isBeamLike()) {
+      return false;
+    }
+
     const screenHeight = this.SCREEN_HEIGHT;
     const viewport = this.getSideViewport(bullet.side);
 
