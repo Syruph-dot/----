@@ -61,6 +61,7 @@ interface AIContext {
   currentCenter: Vector2;
   currentThreat: number;
   nearbyBulletCount: number;
+  dangerousBullets: Bullet[];
   enemies: Enemy[];
   boss: Boss | null;
   opponentHealthRatio: number;
@@ -262,9 +263,9 @@ export class AIController {
       .filter((enemy) => enemy.active);
     const boss = this.game.getBoss();
 
-    const bullets = this.getDangerousBullets();
-    const currentThreat = this.computeThreatScore(currentCenter, bullets, enemies);
-    const nearbyBulletCount = bullets.filter((bullet) => this.distance(this.getBulletCenter(bullet), currentCenter) < 120).length;
+    const dangerousBullets = this.getDangerousBullets();
+    const currentThreat = this.computeThreatScore(currentCenter, dangerousBullets, enemies);
+    const nearbyBulletCount = dangerousBullets.filter((bullet) => this.distance(this.getBulletCenter(bullet), currentCenter) < 120).length;
 
     const opponentSide = this.getOpponentSide();
     const opponentPlayer = this.game.getPlayer(opponentSide);
@@ -276,6 +277,7 @@ export class AIController {
       currentCenter,
       currentThreat,
       nearbyBulletCount,
+      dangerousBullets,
       enemies,
       boss,
       opponentHealthRatio: opponentPlayer ? opponentPlayer.health / 100 : 1,
@@ -285,7 +287,7 @@ export class AIController {
   }
 
   private chooseMovementPlan(context: AIContext): MovementPlan {
-    const bullets = this.getDangerousBullets();
+    const bullets = context.dangerousBullets;
     const screenHeight = this.game.getScreenHeight();
     const sideBounds = this.getSideBounds();
     const currentCenter = context.currentCenter;

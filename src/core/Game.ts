@@ -660,16 +660,36 @@ export class Game {
       this.comboSystem2.update(deltaTime);
     }
     
-    this.bullets = this.bullets.filter(b => b.active);
-    this.enemies = this.enemies.filter(e => e.active);
+    this.compactActiveEntities(this.bullets);
+    this.compactActiveEntities(this.enemies);
     this.updateGameOverState();
   }
   
   private render() {
     this.ctx.clearRect(0, 0, this.SCREEN_WIDTH, this.SCREEN_HEIGHT);
 
-    this.renderSideWorld('left');
-    this.renderSideWorld('right');
+    const leftEnemies: Enemy[] = [];
+    const rightEnemies: Enemy[] = [];
+    for (const enemy of this.enemies) {
+      if (enemy.side === 'left') {
+        leftEnemies.push(enemy);
+      } else {
+        rightEnemies.push(enemy);
+      }
+    }
+
+    const leftBullets: Bullet[] = [];
+    const rightBullets: Bullet[] = [];
+    for (const bullet of this.bullets) {
+      if (bullet.side === 'left') {
+        leftBullets.push(bullet);
+      } else {
+        rightBullets.push(bullet);
+      }
+    }
+
+    this.renderSideWorld('left', leftEnemies, leftBullets);
+    this.renderSideWorld('right', rightEnemies, rightBullets);
     this.renderScreenDivider();
     
     this.renderUI();
@@ -684,7 +704,7 @@ export class Game {
     }
   }
 
-  private renderSideWorld(side: PlayerSide) {
+  private renderSideWorld(side: PlayerSide, enemies: Enemy[], bullets: Bullet[]) {
     const viewport = this.getSideViewport(side);
 
     this.ctx.save();
@@ -699,15 +719,13 @@ export class Game {
       player.render(this.ctx);
     }
 
-    for (const enemy of this.enemies) {
-      if (enemy.side !== side) continue;
+    for (const enemy of enemies) {
       enemy.render(this.ctx);
     }
 
     this.renderExpandingFields(side);
 
-    for (const bullet of this.bullets) {
-      if (bullet.side !== side) continue;
+    for (const bullet of bullets) {
       bullet.render(this.ctx);
     }
 
@@ -985,15 +1003,43 @@ export class Game {
       return;
     }
 
+    const leftBullets: Bullet[] = [];
+    const rightBullets: Bullet[] = [];
+    for (const bullet of this.bullets) {
+      if (!bullet.active) {
+        continue;
+      }
+      if (bullet.side === 'left') {
+        leftBullets.push(bullet);
+      } else {
+        rightBullets.push(bullet);
+      }
+    }
+
+    const leftEnemies: Enemy[] = [];
+    const rightEnemies: Enemy[] = [];
+    for (const enemy of this.enemies) {
+      if (!enemy.active) {
+        continue;
+      }
+      if (enemy.side === 'left') {
+        leftEnemies.push(enemy);
+      } else {
+        rightEnemies.push(enemy);
+      }
+    }
+
     for (const field of this.expandingFields) {
       field.elapsed = Math.min(field.duration, field.elapsed + deltaTime);
       const progress = field.duration <= 0 ? 1 : field.elapsed / field.duration;
       const radius = field.targetRadius * progress;
       const radiusSq = radius * radius;
       let clearedBullets = 0;
+      const fieldBullets = field.side === 'left' ? leftBullets : rightBullets;
+      const fieldEnemies = field.side === 'left' ? leftEnemies : rightEnemies;
 
-      for (const bullet of this.bullets) {
-        if (!bullet.active || bullet.side !== field.side) {
+      for (const bullet of fieldBullets) {
+        if (!bullet.active) {
           continue;
         }
 
@@ -1016,8 +1062,8 @@ export class Game {
         this.getScoreSystem(field.ownerSide).addBulletClear(clearedBullets);
       }
 
-      for (const enemy of this.enemies) {
-        if (!enemy.active || enemy.side !== field.side) {
+      for (const enemy of fieldEnemies) {
+        if (!enemy.active) {
           continue;
         }
 
@@ -1032,14 +1078,18 @@ export class Game {
       }
     }
 
-    const expiredFields = this.expandingFields.filter((field) => field.elapsed >= field.duration);
-    for (const field of expiredFields) {
-      if (typeof field.skillTokenId === 'number') {
-        this.completeSkillEntity(field.skillTokenId);
+    let write = 0;
+    for (let i = 0; i < this.expandingFields.length; i++) {
+      const field = this.expandingFields[i];
+      if (field.elapsed >= field.duration) {
+        if (typeof field.skillTokenId === 'number') {
+          this.completeSkillEntity(field.skillTokenId);
+        }
+        continue;
       }
+      this.expandingFields[write++] = field;
     }
-
-    this.expandingFields = this.expandingFields.filter((field) => field.elapsed < field.duration);
+    this.expandingFields.length = write;
   }
 
   private renderExpandingFields(side: PlayerSide) {
@@ -1093,6 +1143,20 @@ export class Game {
   
   private checkCollisions() {
     const enemyCollisionDamage = 15;
+    const leftActiveEnemies: Enemy[] = [];
+    const rightActiveEnemies: Enemy[] = [];
+
+    for (const enemy of this.enemies) {
+      if (!enemy.active) {
+        continue;
+      }
+
+      if (enemy.side === 'left') {
+        leftActiveEnemies.push(enemy);
+      } else {
+        rightActiveEnemies.push(enemy);
+      }
+    }
 
     for (let bullet of this.bullets) {
       if (!bullet.active) continue;
@@ -1103,8 +1167,9 @@ export class Game {
         const targetSide = bullet.category === 'player1' ? 'left' : 'right';
 
         // 检测与敌机碰撞
-        for (const enemy of this.enemies) {
-          if (enemy.side !== targetSide || !enemy.active) {
+        const targetEnemies = targetSide === 'left' ? leftActiveEnemies : rightActiveEnemies;
+        for (const enemy of targetEnemies) {
+          if (!enemy.active) {
             continue;
           }
 
@@ -1414,11 +1479,23 @@ export class Game {
   }
   
   getEnemies(side: PlayerSide): Enemy[] {
-    return this.enemies.filter(e => e.side === side);
+    const result: Enemy[] = [];
+    for (const enemy of this.enemies) {
+      if (enemy.side === side) {
+        result.push(enemy);
+      }
+    }
+    return result;
   }
   
   getBullets(side: PlayerSide): Bullet[] {
-    return this.bullets.filter(b => b.side === side);
+    const result: Bullet[] = [];
+    for (const bullet of this.bullets) {
+      if (bullet.side === side) {
+        result.push(bullet);
+      }
+    }
+    return result;
   }
   
   getBoss(): Boss | null {
@@ -1468,6 +1545,18 @@ export class Game {
     }
 
     return bullet.x < viewport.x || bullet.x + bullet.width > viewport.x + viewport.width;
+  }
+
+  private compactActiveEntities<T extends { active: boolean }>(entities: T[]) {
+    let write = 0;
+    for (let read = 0; read < entities.length; read++) {
+      const entity = entities[read];
+      if (!entity.active) {
+        continue;
+      }
+      entities[write++] = entity;
+    }
+    entities.length = write;
   }
 
   hasActiveEnemies(): boolean {
