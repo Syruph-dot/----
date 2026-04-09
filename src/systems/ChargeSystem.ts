@@ -14,8 +14,8 @@ export class ChargeSystem {
     level3: 60
   };
   private readonly maxCharge = 80;
-  // 降低蓄力速度到当前的 66%
-  private readonly holdChargeRate = 0.05 * 0.66;
+  // 将蓄力速度降低为当前值的 66%（按用户请求缩减）
+  private readonly holdChargeRate = 0.05 * 0.66 * 0.66;
 
   constructor() {
     // ensure gauge accumulation lower bound equals first-level threshold

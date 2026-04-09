@@ -3,7 +3,7 @@ export class ScoreSystem {
   private comboScore = 0;
   private nextBossThreshold = 400;
 
-  private readonly bossThresholdStep = 400;
+  private readonly bossThresholdStep = 1000;
   private readonly comboBonusCap = 0.8;
   private readonly comboBonusScale = 250;
   private readonly enemyKillBaseScore = 8;

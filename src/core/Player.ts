@@ -24,7 +24,7 @@ export class Player {
   movingDown = false;
   private focusEnabled = false;
   private focusMode = false;
-  private readonly hitboxRadius = 4;
+  private readonly hitboxRadius = 4 * 0.95;
   
   private side: PlayerSide;
   private readonly aircraftProfile: AircraftProfile;
@@ -107,7 +107,8 @@ export class Player {
 
       this.svgHitboxCore = document.createElementNS(svgNS, 'circle') as SVGCircleElement;
       this.svgHitboxCore.setAttribute('r', String(this.hitboxRadius));
-      this.svgHitboxCore.setAttribute('fill', this.side === 'left' ? 'rgba(89, 240, 255, 0.95)' : 'rgba(255, 111, 142, 0.95)');
+      // 判定点改为白色，并保持与实际判定半径一致
+      this.svgHitboxCore.setAttribute('fill', 'rgba(255, 255, 255, 0.95)');
       this.svgHitboxCore.setAttribute('stroke', 'rgba(255, 255, 255, 0.82)');
       this.svgHitboxCore.setAttribute('stroke-width', '1');
       this.svgHitboxCore.setAttribute('opacity', '0');
@@ -238,7 +239,8 @@ export class Player {
 
   private drawCanvasHitbox(ctx: CanvasRenderingContext2D) {
     const ringColor = this.side === 'left' ? 'rgba(89, 240, 255, 0.92)' : 'rgba(255, 111, 142, 0.92)';
-    const coreColor = this.side === 'left' ? 'rgba(89, 240, 255, 0.95)' : 'rgba(255, 111, 142, 0.95)';
+    // 判定点显示为白色，且与判定半径（this.hitboxRadius）完全一致
+    const coreColor = 'rgba(255, 255, 255, 0.95)';
     ctx.beginPath();
     ctx.arc(0, 0, this.hitboxRadius + 3, 0, Math.PI * 2);
     ctx.fillStyle = 'rgba(255, 255, 255, 0.04)';
@@ -531,7 +533,7 @@ export class Player {
     });
     
     const boss = game.getBoss();
-    if (boss && boss.side !== this.side) {
+    if (boss && boss.side !== this.side && boss.canTakeDamage()) {
       const damage = boss.maxHealth * 0.75;
       boss.health -= damage;
       if (boss.health <= 0) {

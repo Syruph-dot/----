@@ -11,9 +11,10 @@ export abstract class Boss {
   active = true;
   
   side: PlayerSide;
-  protected speed = 2;
+  protected speed = 1;
   protected moveDirection = 1;
   private skillLifecycleId: number | null = null;
+  private spawnInvulnerableUntilMs = 0;
 
   constructor(x: number, y: number, side: PlayerSide, maxHealth = 125) {
     this.x = x;
@@ -21,6 +22,7 @@ export abstract class Boss {
     this.side = side;
     this.maxHealth = maxHealth;
     this.health = maxHealth;
+    this.setSpawnInvulnerability(650);
   }
 
   update(deltaTime: number, game: Game) {
@@ -57,6 +59,14 @@ export abstract class Boss {
 
   clearSkillLifecycleId() {
     this.skillLifecycleId = null;
+  }
+
+  setSpawnInvulnerability(durationMs: number) {
+    this.spawnInvulnerableUntilMs = performance.now() + Math.max(0, durationMs);
+  }
+
+  canTakeDamage(nowMs = performance.now()): boolean {
+    return this.active && this.health > 0 && nowMs >= this.spawnInvulnerableUntilMs;
   }
 
   render(ctx: CanvasRenderingContext2D) {

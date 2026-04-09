@@ -74,9 +74,6 @@ export class Game {
   private readonly SCREEN_WIDTH: number;
   private readonly SCREEN_HEIGHT: number;
   private readonly MARGIN = 0.1;
-  // 防止多怪同时死亡导致爆发式生成弹幕：记录每侧上次生成时间
-  private lastBurstSpawnTime: Record<PlayerSide, number> = { left: 0, right: 0 };
-  private readonly BURST_COOLDOWN_MS = 300;
   private expandingFields: ExpandingField[] = [];
   private leftBackdropCache: HTMLCanvasElement | null = null;
   private rightBackdropCache: HTMLCanvasElement | null = null;
@@ -844,16 +841,20 @@ export class Game {
     width: number, 
     height: number,
     chargeSystem: ChargeSystem,
-    side: PlayerSide
+    _side: PlayerSide
   ) {
     const chargeMax = chargeSystem.getChargeMax();
     const currentCharge = chargeSystem.getCurrentCharge();
     const maxCharge = chargeSystem.getMaxChargeCap();
     const thresholds = chargeSystem.getThresholds();
-    const palette = side === 'left'
-      ? { base: '#59f0ff', glow: 'rgba(89, 240, 255, 0.65)' }
-      : { base: '#ff6f8e', glow: 'rgba(255, 111, 142, 0.65)' };
-    
+
+    // Determine display color based on accumulated gauge thresholds
+    let activeColor = '#9eb2d7';
+    if (chargeMax >= maxCharge) activeColor = '#fff176';
+    else if (chargeMax >= thresholds.level3) activeColor = '#ff6f8e';
+    else if (chargeMax >= thresholds.level2) activeColor = '#ffd166';
+    else if (chargeMax >= thresholds.level1) activeColor = '#59f0ff';
+
     ctx.save();
     this.drawRoundedRect(ctx, x, y, width, height, height / 2);
     ctx.fillStyle = 'rgba(255, 255, 255, 0.06)';
@@ -861,45 +862,85 @@ export class Game {
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
     ctx.stroke();
 
+    // accumulated gauge (reserve) overlay
     const accumulatedWidth = Math.max(0, Math.min(width, (chargeMax / maxCharge) * width));
     this.drawRoundedRect(ctx, x, y, accumulatedWidth, height, height / 2);
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.18)';
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
     ctx.fill();
 
+    // hold-charge filled portion
     const safeCurrent = Math.min(currentCharge, chargeMax);
     const filledWidth = Math.max(0, Math.min(width, (safeCurrent / maxCharge) * width));
+
     const fillGradient = ctx.createLinearGradient(x, y, x + width, y);
-    fillGradient.addColorStop(0, palette.base);
-    fillGradient.addColorStop(1, side === 'left' ? '#b8ffff' : '#ffb1c0');
+    fillGradient.addColorStop(0, activeColor);
+    fillGradient.addColorStop(1, 'rgba(255,255,255,0.12)');
+
     this.drawRoundedRect(ctx, x, y, filledWidth, height, height / 2);
     ctx.fillStyle = fillGradient;
     ctx.fill();
-    ctx.shadowColor = palette.glow;
+
+    // small sheen + glow
+    ctx.shadowColor = activeColor;
     ctx.shadowBlur = 10;
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
     ctx.fillRect(x, y, Math.min(18, filledWidth), height);
-    
     ctx.shadowBlur = 0;
-    
+
+    // colored threshold ticks
+    const tickColor1 = '#59f0ff';
+    const tickColor2 = '#ffd166';
+    const tickColor3 = '#ff6f8e';
     const thresholdX1 = x + (thresholds.level1 / maxCharge) * width;
     const thresholdX2 = x + (thresholds.level2 / maxCharge) * width;
     const thresholdX3 = x + (thresholds.level3 / maxCharge) * width;
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.52)';
-    ctx.lineWidth = 1;
-    [thresholdX1, thresholdX2, thresholdX3].forEach((tickX) => {
+
+    ctx.lineWidth = 1.5;
+    ([[thresholdX1, tickColor1], [thresholdX2, tickColor2], [thresholdX3, tickColor3]] as [number, string][]).forEach(([tx, color]: [number, string]) => {
+      ctx.strokeStyle = color;
       ctx.beginPath();
-      ctx.moveTo(tickX, y - 1);
-      ctx.lineTo(tickX, y + height + 1);
+      ctx.moveTo(tx, y - 2);
+      ctx.lineTo(tx, y + height + 2);
       ctx.stroke();
     });
 
-    ctx.strokeStyle = 'rgba(255, 209, 102, 0.64)';
-    ctx.lineWidth = 1.5;
+    // subtle baseline
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.06)';
+    ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(x, y + height / 2);
     ctx.lineTo(x + width, y + height / 2);
     ctx.stroke();
-    
+
+    // special pulsing effect when final threshold reached (either reserve cap or held to cap)
+    const reachedFinal = chargeMax >= maxCharge || safeCurrent >= maxCharge;
+    if (reachedFinal && filledWidth > 0) {
+      const now = performance.now();
+      const pulse = 0.5 + 0.5 * Math.sin(now / 240);
+      ctx.save();
+      ctx.globalAlpha = 0.12 + 0.06 * pulse;
+      ctx.shadowColor = activeColor;
+      ctx.shadowBlur = 20 * (1 + pulse);
+      this.drawRoundedRect(ctx, x - 2, y - 2, filledWidth + 4, height + 4, (height + 4) / 2);
+      ctx.fillStyle = activeColor;
+      ctx.fill();
+      ctx.restore();
+
+      // moving sheen over filled area
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const sheenW = Math.max(16, width * 0.12);
+      const sheenX = x + ((now % 1200) / 1200) * (Math.max(0, filledWidth + sheenW)) - sheenW;
+      const sheenGrad = ctx.createLinearGradient(sheenX, y, sheenX + sheenW, y);
+      sheenGrad.addColorStop(0, 'rgba(255,255,255,0)');
+      sheenGrad.addColorStop(0.5, 'rgba(255,255,255,0.45)');
+      sheenGrad.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = sheenGrad;
+      this.drawRoundedRect(ctx, sheenX, y, sheenW, height, height / 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
     ctx.fillStyle = '#dbe7ff';
     ctx.font = '10px Microsoft YaHei';
     ctx.textAlign = 'right';
@@ -1268,6 +1309,9 @@ export class Game {
         // 检测与Boss碰撞
         if (bullet.active && this.boss && this.boss.side === targetSide) {
           if (this.isColliding(bullet, this.boss)) {
+                if (!this.boss.canTakeDamage()) {
+                  continue;
+                }
                 if (bullet.bulletType === 'special' && bullet.hasHit(this.boss)) {
                   continue;
                 }
@@ -1420,7 +1464,7 @@ export class Game {
       b.active = false;
     });
 
-    // 提高转移概率：90% 概率至少转移 1 个，10% 概率转移 2 个（总体至少转移概率 90%）
+    // 转移概率：10% 转移 2 个，40% 转移 1 个，50% 不转移
     const roll = Math.random();
     let transferCount = 0;
     if (roll < 0.1) {
@@ -1454,11 +1498,6 @@ export class Game {
         } else {
           if (this.chargeSystem2 && this.comboSystem2) {
             const combo2 = this.comboSystem2.getCombo();
-
-    const destroyedBulletCount = Math.max(0, destroyableNearby.length - Math.min(transferCount, destroyableNearby.length));
-    if (destroyedBulletCount > 0) {
-      this.getScoreSystem(side).addBulletClear(destroyedBulletCount);
-    }
             const mult2 = combo2 > 20 ? 2 : combo2 > 10 ? 1.5 : 1;
             this.chargeSystem2.addCharge(1 * mult2);
           }
@@ -1466,49 +1505,9 @@ export class Game {
       });
     }
 
-    // 80% 概率把被击杀的小怪直接在对方界面生成若干弹幕（带转移动画），弹幕为向下 ±37° 散射
-    if (Math.random() < 0.8) {
-      const targetSide = side === 'left' ? 'right' : 'left';
-      // 防止多只小怪在极短时间内累计生成大量弹幕：按目标侧做冷却合并
-      const now = performance.now();
-      const last = this.lastBurstSpawnTime[targetSide] ?? 0;
-      if (now - last >= this.BURST_COOLDOWN_MS) {
-        const viewport = this.getSideViewport(targetSide);
-        // 弹幕数量随小怪血量略有增长（hp:2->5,4->6,6->7,8->8）
-        const bulletCount = 4 + Math.floor(enemy.health / 2);
-
-        for (let i = 0; i < bulletCount; i++) {
-          const startX = enemy.x + enemy.width / 2;
-          const startY = enemy.y + enemy.height / 2;
-          const destX = viewport.x + Math.random() * viewport.width;
-          const destY = viewport.y + Math.random() * (viewport.height * 0.4);
-
-          const nb = new Bullet(
-            startX,
-            startY,
-            0,
-            0,
-            'barrage',
-            'normal',
-            true,
-            4,
-            10,
-            10,
-            targetSide
-          );
-          // 使用转移动画到目标点，完成后会设定向下 ±37° 的速度
-          const targetPlayer = this.getPlayer(targetSide);
-          const aimTarget = targetPlayer
-            ? { x: targetPlayer.x + targetPlayer.width / 2, y: targetPlayer.y + targetPlayer.height / 2 }
-            : undefined;
-          nb.startTransfer(destX, destY, 600, 'barrage', targetSide, aimTarget);
-          this.addBullet(nb);
-        }
-
-        this.lastBurstSpawnTime[targetSide] = now;
-      } else {
-        // 跳过本次生成（最近已生成过），但已存在的可转移子弹仍会被处理
-      }
+    const destroyedBulletCount = Math.max(0, destroyableNearby.length - Math.min(transferCount, destroyableNearby.length));
+    if (destroyedBulletCount > 0) {
+      this.getScoreSystem(side).addBulletClear(destroyedBulletCount);
     }
   }
 

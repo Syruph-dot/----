@@ -13,8 +13,8 @@ export class ScatterBoss extends Boss {
   private readonly phase1BurstInterval = 120; // ms between bursts in phase 1
   private readonly phase1BurstSize = 8;
   private readonly phase1MaxBullets = 160;
-  private readonly phase1SpreadDeg = 90;
-  private readonly phase1BaseSpeed = 2.2;
+  private readonly phase1SpreadDeg = 120;
+  private readonly phase1BaseSpeed = 4;
 
   private phase2BurstTimer = 0;
   private phase2BurstsFired = 0;
@@ -132,6 +132,34 @@ export class ScatterBoss extends Boss {
         this.side
       );
       game.addBullet(bullet);
+      const bullet2 = new Bullet(
+        this.x + this.width / 2,
+        this.y + this.height,
+        i * 1.5/4*5,
+        5,
+        'barrage',
+        'normal',
+        true,
+        4,
+        10,
+        10,
+        this.side
+      );
+      game.addBullet(bullet2);
+      const bullet3 = new Bullet(
+        this.x + this.width / 2,
+        this.y + this.height,
+        i * 1.5/4*5.5,
+        5.5,
+        'barrage',
+        'normal',
+        true,
+        4,
+        10,
+        10,
+        this.side
+      );
+      game.addBullet(bullet3);
       // logging disabled: legacy scatter shot
     }
   }

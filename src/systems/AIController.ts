@@ -180,8 +180,11 @@ export class AIController {
         return 'bomb';
       }
 
-      if (bossOnOpponentSide && boss && boss.health <= this.profile.bossBombHealthThreshold) {
-        return 'bomb';
+      if (bossOnOpponentSide && boss && boss.canTakeDamage()) {
+        const bossHealthRatio = boss.health / Math.max(1, boss.maxHealth);
+        if (bossHealthRatio <= this.profile.bossBombHealthThreshold) {
+          return 'bomb';
+        }
       }
 
       if (context.nearbyBulletCount >= this.profile.bombNearbyThreshold && panicThreat >= this.profile.bombThreatThreshold) {
@@ -633,7 +636,7 @@ export class AIController {
           opponentLowHealthBonus: 0.8,
           bombThreatThreshold: 2.3,
           bombNearbyThreshold: 7,
-          bossBombHealthThreshold: 260,
+          bossBombHealthThreshold: 0.26,
           allowUnlimitedTopSkill: false,
           opportunisticBurstThreatMax: 0.9,
           enemyBodyThreatWeight: 0.75,
@@ -664,7 +667,7 @@ export class AIController {
           opponentLowHealthBonus: 1.8,
           bombThreatThreshold: 3.0,
           bombNearbyThreshold: 4,
-          bossBombHealthThreshold: 380,
+          bossBombHealthThreshold: 0.38,
           allowUnlimitedTopSkill: true,
           opportunisticBurstThreatMax: 0.75,
           enemyBodyThreatWeight: 1.3,
@@ -696,7 +699,7 @@ export class AIController {
           opponentLowHealthBonus: 1.1,
           bombThreatThreshold: 2.8,
           bombNearbyThreshold: 6,
-          bossBombHealthThreshold: 300,
+          bossBombHealthThreshold: 0.3,
           allowUnlimitedTopSkill: false,
           opportunisticBurstThreatMax: 0.85,
           enemyBodyThreatWeight: 1,
