@@ -78,6 +78,9 @@ export class Game {
   private lastBurstSpawnTime: Record<PlayerSide, number> = { left: 0, right: 0 };
   private readonly BURST_COOLDOWN_MS = 300;
   private expandingFields: ExpandingField[] = [];
+  private leftBackdropCache: HTMLCanvasElement | null = null;
+  private rightBackdropCache: HTMLCanvasElement | null = null;
+  private dividerCache: HTMLCanvasElement | null = null;
   
   constructor(canvas: HTMLCanvasElement, config: Partial<GameConfig> = {}) {
     this.ctx = canvas.getContext('2d')!;
@@ -201,6 +204,9 @@ export class Game {
     this.bullets = [];
     this.boss = null;
     this.expandingFields = [];
+    this.leftBackdropCache = null;
+    this.rightBackdropCache = null;
+    this.dividerCache = null;
     this.skillLifecycles.clear();
     this.activeSkillLifecycleBySide = { left: null, right: null };
 
@@ -348,6 +354,10 @@ export class Game {
       this.svgOverlay.parentElement.removeChild(this.svgOverlay);
       this.svgOverlay = null;
     }
+
+    this.leftBackdropCache = null;
+    this.rightBackdropCache = null;
+    this.dividerCache = null;
   }
 
   isRunning(): boolean {
@@ -737,37 +747,14 @@ export class Game {
   }
   
   private renderScreenDivider() {
+    this.ensureStaticRenderCache();
+
     const dividerX = this.SCREEN_WIDTH / 2;
     const marginWidth = this.SCREEN_WIDTH * this.MARGIN / 2;
 
     const stripX = dividerX - marginWidth;
-    const stripWidth = marginWidth * 2;
-
-    const dividerGradient = this.ctx.createLinearGradient(stripX, 0, stripX + stripWidth, 0);
-    dividerGradient.addColorStop(0, 'rgba(89, 240, 255, 0.02)');
-    dividerGradient.addColorStop(0.5, 'rgba(234, 69, 96, 0.16)');
-    dividerGradient.addColorStop(1, 'rgba(255, 209, 102, 0.04)');
-    this.ctx.fillStyle = dividerGradient;
-    this.ctx.fillRect(stripX, 0, stripWidth, this.SCREEN_HEIGHT);
-
-    this.ctx.save();
-    this.ctx.shadowColor = 'rgba(234, 69, 96, 0.45)';
-    this.ctx.shadowBlur = 18;
-    this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.82)';
-    this.ctx.lineWidth = 1.5;
-    this.ctx.beginPath();
-    this.ctx.moveTo(dividerX, 0);
-    this.ctx.lineTo(dividerX, this.SCREEN_HEIGHT);
-    this.ctx.stroke();
-    this.ctx.restore();
-
-    this.ctx.strokeStyle = 'rgba(89, 240, 255, 0.22)';
-    this.ctx.lineWidth = 1;
-    for (let y = 10; y < this.SCREEN_HEIGHT; y += 36) {
-      this.ctx.beginPath();
-      this.ctx.moveTo(dividerX - 10, y);
-      this.ctx.lineTo(dividerX + 10, y + 8);
-      this.ctx.stroke();
+    if (this.dividerCache) {
+      this.ctx.drawImage(this.dividerCache, stripX, 0);
     }
   }
   
@@ -941,29 +928,11 @@ export class Game {
   }
 
   private renderArenaBackdrop(side: PlayerSide, viewport: { x: number; y: number; width: number; height: number }) {
+    this.ensureStaticRenderCache();
+    const cache = side === 'left' ? this.leftBackdropCache : this.rightBackdropCache;
     const accent = side === 'left' ? 'rgba(89, 240, 255, 0.15)' : 'rgba(255, 111, 142, 0.15)';
-    const baseGradient = this.ctx.createLinearGradient(viewport.x, viewport.y, viewport.x, viewport.y + viewport.height);
-    baseGradient.addColorStop(0, 'rgba(9, 15, 31, 0.88)');
-    baseGradient.addColorStop(1, 'rgba(5, 8, 18, 0.96)');
-    this.ctx.fillStyle = baseGradient;
-    this.ctx.fillRect(viewport.x, viewport.y, viewport.width, viewport.height);
-
-    this.ctx.save();
-    this.ctx.globalAlpha = 0.12;
-    this.ctx.strokeStyle = accent;
-    this.ctx.lineWidth = 1;
-    const gridStep = 36;
-    for (let gx = viewport.x; gx <= viewport.x + viewport.width; gx += gridStep) {
-      this.ctx.beginPath();
-      this.ctx.moveTo(gx, viewport.y);
-      this.ctx.lineTo(gx, viewport.y + viewport.height);
-      this.ctx.stroke();
-    }
-    for (let gy = viewport.y; gy <= viewport.y + viewport.height; gy += gridStep) {
-      this.ctx.beginPath();
-      this.ctx.moveTo(viewport.x, gy);
-      this.ctx.lineTo(viewport.x + viewport.width, gy);
-      this.ctx.stroke();
+    if (cache) {
+      this.ctx.drawImage(cache, viewport.x, viewport.y);
     }
 
     const scanPhase = (performance.now() * 0.02) % viewport.height;
@@ -975,12 +944,108 @@ export class Game {
     this.ctx.fillStyle = scanGradient;
     this.ctx.fillRect(viewport.x, scanY - 18, viewport.width, 36);
     this.ctx.restore();
+  }
 
-    this.ctx.save();
-    this.ctx.strokeStyle = side === 'left' ? 'rgba(89, 240, 255, 0.18)' : 'rgba(255, 111, 142, 0.18)';
-    this.ctx.lineWidth = 2;
-    this.ctx.strokeRect(viewport.x + 1, viewport.y + 1, viewport.width - 2, viewport.height - 2);
-    this.ctx.restore();
+  private ensureStaticRenderCache() {
+    if (this.leftBackdropCache && this.rightBackdropCache && this.dividerCache) {
+      return;
+    }
+
+    const leftViewport = this.getSideViewport('left');
+    const rightViewport = this.getSideViewport('right');
+    this.leftBackdropCache = this.buildSideBackdropLayer('left', leftViewport.width, leftViewport.height);
+    this.rightBackdropCache = this.buildSideBackdropLayer('right', rightViewport.width, rightViewport.height);
+
+    const stripWidth = this.SCREEN_WIDTH * this.MARGIN;
+    this.dividerCache = this.buildDividerLayer(stripWidth, this.SCREEN_HEIGHT);
+  }
+
+  private buildSideBackdropLayer(side: PlayerSide, width: number, height: number): HTMLCanvasElement {
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.ceil(width));
+    canvas.height = Math.max(1, Math.ceil(height));
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      return canvas;
+    }
+
+    const accent = side === 'left' ? 'rgba(89, 240, 255, 0.15)' : 'rgba(255, 111, 142, 0.15)';
+    const borderColor = side === 'left' ? 'rgba(89, 240, 255, 0.18)' : 'rgba(255, 111, 142, 0.18)';
+
+    const baseGradient = ctx.createLinearGradient(0, 0, 0, height);
+    baseGradient.addColorStop(0, 'rgba(9, 15, 31, 0.88)');
+    baseGradient.addColorStop(1, 'rgba(5, 8, 18, 0.96)');
+    ctx.fillStyle = baseGradient;
+    ctx.fillRect(0, 0, width, height);
+
+    ctx.save();
+    ctx.globalAlpha = 0.12;
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 1;
+    const gridStep = 36;
+    for (let gx = 0; gx <= width; gx += gridStep) {
+      ctx.beginPath();
+      ctx.moveTo(gx, 0);
+      ctx.lineTo(gx, height);
+      ctx.stroke();
+    }
+    for (let gy = 0; gy <= height; gy += gridStep) {
+      ctx.beginPath();
+      ctx.moveTo(0, gy);
+      ctx.lineTo(width, gy);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    ctx.save();
+    ctx.strokeStyle = borderColor;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(1, 1, Math.max(1, width - 2), Math.max(1, height - 2));
+    ctx.restore();
+
+    return canvas;
+  }
+
+  private buildDividerLayer(width: number, height: number): HTMLCanvasElement {
+    const canvas = document.createElement('canvas');
+    const safeWidth = Math.max(1, Math.ceil(width));
+    const safeHeight = Math.max(1, Math.ceil(height));
+    canvas.width = safeWidth;
+    canvas.height = safeHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      return canvas;
+    }
+
+    const centerX = safeWidth / 2;
+    const dividerGradient = ctx.createLinearGradient(0, 0, safeWidth, 0);
+    dividerGradient.addColorStop(0, 'rgba(89, 240, 255, 0.02)');
+    dividerGradient.addColorStop(0.5, 'rgba(234, 69, 96, 0.16)');
+    dividerGradient.addColorStop(1, 'rgba(255, 209, 102, 0.04)');
+    ctx.fillStyle = dividerGradient;
+    ctx.fillRect(0, 0, safeWidth, safeHeight);
+
+    ctx.save();
+    ctx.shadowColor = 'rgba(234, 69, 96, 0.45)';
+    ctx.shadowBlur = 18;
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.82)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(centerX, 0);
+    ctx.lineTo(centerX, safeHeight);
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.strokeStyle = 'rgba(89, 240, 255, 0.22)';
+    ctx.lineWidth = 1;
+    for (let y = 10; y < safeHeight; y += 36) {
+      ctx.beginPath();
+      ctx.moveTo(centerX - 10, y);
+      ctx.lineTo(centerX + 10, y + 8);
+      ctx.stroke();
+    }
+
+    return canvas;
   }
 
   private drawRoundedRect(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
@@ -1173,11 +1238,11 @@ export class Game {
             continue;
           }
 
-          if (bullet.bulletType === 'special' && bullet.hasHit(enemy)) {
+          if (!this.isColliding(bullet, enemy)) {
             continue;
           }
 
-          if (!this.isColliding(bullet, enemy)) {
+          if (bullet.bulletType === 'special' && bullet.hasHit(enemy)) {
             continue;
           }
 
@@ -1202,11 +1267,10 @@ export class Game {
 
         // 检测与Boss碰撞
         if (bullet.active && this.boss && this.boss.side === targetSide) {
-          if (bullet.bulletType === 'special' && bullet.hasHit(this.boss)) {
-            continue;
-          }
-
           if (this.isColliding(bullet, this.boss)) {
+                if (bullet.bulletType === 'special' && bullet.hasHit(this.boss)) {
+                  continue;
+                }
                 // logging disabled: boss hit attempt
 
                 bullet.markHit(this.boss);
@@ -1253,10 +1317,10 @@ export class Game {
     }
 
     // ===== 玩家与杂兵接触碰撞：玩家扣血，杂兵消失 =====
-    for (const enemy of this.enemies) {
+    for (const enemy of leftActiveEnemies) {
       if (!enemy.active) continue;
 
-      const targetPlayer = enemy.side === 'left' ? this.player1 : this.player2;
+      const targetPlayer = this.player1;
       if (!targetPlayer) continue;
 
       if (this.isCollidingWithPlayerHitbox(enemy, targetPlayer)) {
@@ -1273,6 +1337,22 @@ export class Game {
               this.interruptCombo('right');
             }
           }
+        }
+      }
+    }
+
+    for (const enemy of rightActiveEnemies) {
+      if (!enemy.active) continue;
+
+      const targetPlayer = this.player2;
+      if (!targetPlayer) continue;
+
+      if (this.isCollidingWithPlayerHitbox(enemy, targetPlayer)) {
+        const tookDamage = targetPlayer.applyDamage(enemyCollisionDamage, this);
+        enemy.active = false;
+
+        if (tookDamage && this.comboSystem2) {
+          this.interruptCombo('right');
         }
       }
     }
