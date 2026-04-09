@@ -514,20 +514,29 @@ export class Player {
     this.bombs--;
     
     const bullets = game.getBullets(this.side);
+    const clearedBulletCount = bullets.filter(b => b.active).length;
     bullets.forEach(b => b.active = false);
+    if (clearedBulletCount > 0) {
+      game.awardBulletClear(this.side, clearedBulletCount);
+    }
     
     const enemies = game.getEnemies(this.side);
-    enemies.forEach(e => e.active = false);
+    enemies.forEach(e => {
+      if (!e.active) {
+        return;
+      }
+
+      e.active = false;
+      game.awardEnemyDefeat(this.side, e);
+    });
     
     const boss = game.getBoss();
     if (boss && boss.side !== this.side) {
       const damage = boss.maxHealth * 0.75;
-      // logging disabled: bomb on boss
       boss.health -= damage;
-      // logging disabled: boss health after bomb
       if (boss.health <= 0) {
-        // logging disabled: boss killed by bomb
         game.removeBoss();
+        game.awardBossDefeat(this.side);
       }
     }
   }
@@ -558,6 +567,10 @@ export class Player {
   
   getSide(): PlayerSide {
     return this.side;
+  }
+
+  getAircraftType(): AircraftType {
+    return this.aircraftProfile.type;
   }
   
   getChargeSystem(): ChargeSystem {

@@ -178,6 +178,7 @@ export class WaveSystem {
       }
     }
     enemy.health = chosen;
+    enemy.maxHealth = chosen;
 
     enemy.x = Math.max(viewport.x, Math.min(enemy.x, viewport.x + viewport.width - enemy.width));
     // 强制初始刷怪点在顶部版面外，避免版面内瞬移出现

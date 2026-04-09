@@ -7,6 +7,7 @@ import { LaserBoss } from './LaserBoss';
 import { TrackingBoss } from './TrackingBoss';
 import { ChargeSystem } from '../systems/ChargeSystem';
 import { ComboSystem } from '../systems/ComboSystem';
+import { ScoreSystem } from '../systems/ScoreSystem';
 import { WaveSystem } from '../systems/WaveSystem';
 import { AIController } from '../systems/AIController';
 import { GameConfig, PlayerSide, AircraftType, GameMode } from '../entities/types';
@@ -51,6 +52,8 @@ export class Game {
   private chargeSystem2: ChargeSystem | null = null;
   private comboSystem1: ComboSystem;
   private comboSystem2: ComboSystem | null = null;
+  private scoreSystem1: ScoreSystem;
+  private scoreSystem2: ScoreSystem | null = null;
   private waveSystem: WaveSystem;
 
   // In-memory buffer for training events (export as needed)
@@ -115,6 +118,7 @@ export class Game {
     
     this.chargeSystem1 = new ChargeSystem();
     this.comboSystem1 = new ComboSystem();
+    this.scoreSystem1 = new ScoreSystem();
     this.waveSystem = new WaveSystem(this);
     
     this.player1 = new Player(
@@ -130,6 +134,7 @@ export class Game {
 
     this.chargeSystem2 = new ChargeSystem();
     this.comboSystem2 = new ComboSystem();
+    this.scoreSystem2 = new ScoreSystem();
     this.player2 = new Player(
       this.SCREEN_WIDTH * (0.75 - this.MARGIN / 2),
       this.SCREEN_HEIGHT * 0.7,
@@ -186,6 +191,8 @@ export class Game {
     // Reset systems
     if (this.comboSystem1) this.comboSystem1.reset();
     if (this.comboSystem2) this.comboSystem2.reset();
+    if (this.scoreSystem1) this.scoreSystem1.reset();
+    if (this.scoreSystem2) this.scoreSystem2.reset();
     if (this.chargeSystem1) this.chargeSystem1.resetCurrentCharge();
     if (this.chargeSystem2) this.chargeSystem2.resetCurrentCharge();
 
@@ -212,9 +219,8 @@ export class Game {
   }
 
   // Append a training event to in-memory buffer. Lightweight and safe to call frequently.
-  pushTrainingEvent(ev: any) {
+  pushTrainingEvent(_ev: any) {
     // Training/event recording disabled per user request — no-op
-    void ev;
   }
 
   getTrainingEventsJSONL(): string {
@@ -444,6 +450,114 @@ export class Game {
       this.activeSkillLifecycleBySide[lifecycle.side] = null;
     }
   }
+
+  private getScoreSystem(side: PlayerSide): ScoreSystem {
+    return side === 'left' ? this.scoreSystem1 : (this.scoreSystem2 ?? this.scoreSystem1);
+  }
+
+  private getComboSystem(side: PlayerSide): ComboSystem {
+    return side === 'left' ? this.comboSystem1 : (this.comboSystem2 ?? this.comboSystem1);
+  }
+
+  private getChargeSystem(side: PlayerSide): ChargeSystem {
+    return side === 'left' ? this.chargeSystem1 : (this.chargeSystem2 ?? this.chargeSystem1);
+  }
+
+  private bankComboScore(side: PlayerSide) {
+    const scoreSystem = this.getScoreSystem(side);
+    const bankedScore = scoreSystem.bankCombo();
+    // ensure the combo system is reset after banking so the segment is cleared
+    const comboSystem = this.getComboSystem(side);
+    comboSystem.reset();
+
+    if (bankedScore > 0) {
+      this.resolveScoreThresholds(side);
+    }
+  }
+
+  // Unified combo interruption handler: banks combo score, resets combo, and
+  // exposes a single place to add visual/audio hooks in future.
+  private interruptCombo(side: PlayerSide) {
+    this.bankComboScore(side);
+  }
+
+  awardBulletClear(side: PlayerSide, count: number) {
+    this.getScoreSystem(side).addBulletClear(count);
+  }
+
+  awardEnemyDefeat(side: PlayerSide, enemy: Enemy) {
+    this.registerEnemyDefeat(side, enemy);
+  }
+
+  awardBossDefeat(side: PlayerSide) {
+    this.onBossKilled(side);
+  }
+
+  private resolveScoreThresholds(side: PlayerSide) {
+    const scoreSystem = this.getScoreSystem(side);
+    while (scoreSystem.shouldTriggerBoss()) {
+      this.triggerScoreBoss(side);
+      scoreSystem.advanceBossThreshold();
+    }
+  }
+
+  private triggerScoreBoss(side: PlayerSide) {
+    const targetSide = side === 'left' ? 'right' : 'left';
+    const currentBoss = this.boss;
+    const aircraftType = this.getPlayer(side)?.getAircraftType() ?? 'scatter';
+
+    if (!currentBoss) {
+      this.spawnBoss(targetSide, aircraftType);
+      return;
+    }
+
+    if (currentBoss.side === targetSide) {
+      this.grantBomb(side);
+      return;
+    }
+
+    if (currentBoss.side === side) {
+      this.getScoreSystem(side).addReverse();
+      this.removeBoss();
+      this.spawnBoss(targetSide, aircraftType);
+      return;
+    }
+
+    this.removeBoss();
+    this.spawnBoss(targetSide, aircraftType);
+  }
+
+  private grantBomb(side: PlayerSide) {
+    const player = this.getPlayer(side);
+    if (player) {
+      player.bombs += 1;
+    }
+  }
+
+  private spawnBoss(side: PlayerSide, aircraftType: AircraftType = 'scatter', skillTokenId?: number) {
+    const bossX = side === 'left'
+      ? this.SCREEN_WIDTH * 0.25
+      : this.SCREEN_WIDTH * 0.75;
+
+    switch (aircraftType) {
+      case 'scatter':
+        this.boss = new ScatterBoss(bossX, 100, side);
+        break;
+      case 'laser':
+        this.boss = new LaserBoss(bossX, 100, side);
+        break;
+      case 'tracking':
+        this.boss = new TrackingBoss(bossX, 100, side);
+        break;
+      default:
+        this.boss = new ScatterBoss(bossX, 100, side);
+        break;
+    }
+
+    if (this.boss && typeof skillTokenId === 'number') {
+      this.attachSkillBoss(this.boss, skillTokenId);
+    }
+  }
   
   private gameLoop(currentTime: number) {
     if (!this.running) {
@@ -474,6 +588,14 @@ export class Game {
   private update(deltaTime: number) {
     if (this.gameOver) {
       return;
+    }
+
+    if (this.comboSystem1.update(deltaTime)) {
+      this.interruptCombo('left');
+    }
+
+    if (this.comboSystem2 && this.comboSystem2.update(deltaTime)) {
+      this.interruptCombo('right');
     }
 
     this.player1.update(deltaTime, this);
@@ -652,14 +774,14 @@ export class Game {
     this.ctx.font = '700 15px Microsoft YaHei';
     this.ctx.textAlign = 'left';
 
-    this.renderHudStat(32, 50, '连击', String(this.comboSystem1.getCombo()));
+    this.renderHudStat(32, 50, '分数', this.formatScoreDisplay('left'));
     this.renderHudStat(32, 74, '血量', String(this.player1.health));
     this.renderHudStat(32, 98, '炸弹', String(this.player1.bombs));
 
     this.renderChargeBar(this.ctx, leftGaugeX, gaugeY, leftGaugeWidth, gaugeHeight, this.chargeSystem1, this.player1.getSide());
     
     if (this.player2 && this.chargeSystem2 && this.comboSystem2) {
-      this.renderHudStat(this.SCREEN_WIDTH - 260, 50, '连击', String(this.comboSystem2.getCombo()));
+      this.renderHudStat(this.SCREEN_WIDTH - 260, 50, '分数', this.formatScoreDisplay('right'));
       this.renderHudStat(this.SCREEN_WIDTH - 260, 74, '血量', String(this.player2.health));
       this.renderHudStat(this.SCREEN_WIDTH - 260, 98, '炸弹', String(this.player2.bombs));
       
@@ -696,6 +818,18 @@ export class Game {
     this.ctx.font = '700 15px Microsoft YaHei';
     this.ctx.fillText(value, x + 96, y);
     this.ctx.textAlign = 'left';
+  }
+
+  private formatScoreDisplay(side: PlayerSide): string {
+    const scoreSystem = this.getScoreSystem(side);
+    const totalScore = scoreSystem.getTotalScore();
+    const comboScore = scoreSystem.getComboScore();
+
+    if (comboScore <= 0) {
+      return String(totalScore);
+    }
+
+    return `${totalScore} (+${comboScore})`;
   }
   
   private renderChargeBar(
@@ -856,6 +990,7 @@ export class Game {
       const progress = field.duration <= 0 ? 1 : field.elapsed / field.duration;
       const radius = field.targetRadius * progress;
       const radiusSq = radius * radius;
+      let clearedBullets = 0;
 
       for (const bullet of this.bullets) {
         if (!bullet.active || bullet.side !== field.side) {
@@ -873,7 +1008,12 @@ export class Game {
         const dy = by - field.y;
         if (dx * dx + dy * dy <= radiusSq) {
           bullet.active = false;
+          clearedBullets += 1;
         }
+      }
+
+      if (clearedBullets > 0) {
+        this.getScoreSystem(field.ownerSide).addBulletClear(clearedBullets);
       }
 
       for (const enemy of this.enemies) {
@@ -887,6 +1027,7 @@ export class Game {
         const dy = ey - field.y;
         if (dx * dx + dy * dy <= radiusSq) {
           enemy.active = false;
+          this.registerEnemyDefeat(field.ownerSide, enemy);
         }
       }
     }
@@ -1035,9 +1176,11 @@ export class Game {
             if (tookDamage) {
               const side = targetPlayer.getSide();
               if (side === 'left') {
-                this.comboSystem1.reset();
+                this.interruptCombo('left');
               } else {
-                if (this.comboSystem2) this.comboSystem2.reset();
+                if (this.comboSystem2) {
+                  this.interruptCombo('right');
+                }
               }
             }
         }
@@ -1059,9 +1202,11 @@ export class Game {
         if (tookDamage) {
           const side = targetPlayer.getSide();
           if (side === 'left') {
-            this.comboSystem1.reset();
+            this.interruptCombo('left');
           } else {
-            if (this.comboSystem2) this.comboSystem2.reset();
+            if (this.comboSystem2) {
+              this.interruptCombo('right');
+            }
           }
         }
       }
@@ -1091,30 +1236,23 @@ export class Game {
   }
   
   private onEnemyKilled(enemy: Enemy, side: PlayerSide) {
-    if (side === 'left') {
-      this.comboSystem1.increment();
-      // 每个击杀基础增量为 1，根据当前连击应用倍率（>20 -> x2, >10 -> x1.5）
-      const combo1 = this.comboSystem1.getCombo();
-      const mult1 = combo1 > 20 ? 2 : combo1 > 10 ? 1.5 : 1;
-      this.chargeSystem1.addCharge(1 * mult1);
-      
-      if (this.comboSystem1.getCombo() >= 30) {
-        this.triggerBoss('right');
-        this.comboSystem1.reset();
-      }
-    } else if (side === 'right' && this.chargeSystem2 && this.comboSystem2) {
-      this.comboSystem2.increment();
-      const combo2 = this.comboSystem2.getCombo();
-      const mult2 = combo2 > 20 ? 2 : combo2 > 10 ? 1.5 : 1;
-      this.chargeSystem2.addCharge(1 * mult2);
-      
-      if (this.comboSystem2.getCombo() >= 30) {
-        this.triggerBoss('left');
-        this.comboSystem2.reset();
-      }
-    }
+    this.registerEnemyDefeat(side, enemy);
     
     this.triggerExplosion(enemy, side);
+  }
+
+  private registerEnemyDefeat(side: PlayerSide, enemy: Enemy) {
+    const comboSystem = this.getComboSystem(side);
+    const scoreSystem = this.getScoreSystem(side);
+    const chargeSystem = this.getChargeSystem(side);
+
+    comboSystem.increment();
+    scoreSystem.addEnemyKill(enemy.maxHealth);
+
+    // 每个击杀基础增量为 1，根据当前连击应用倍率（>20 -> x2, >10 -> x1.5）
+    const combo = comboSystem.getCombo();
+    const mult = combo > 20 ? 2 : combo > 10 ? 1.5 : 1;
+    chargeSystem.addCharge(1 * mult);
   }
   
   private triggerExplosion(enemy: Enemy, side: PlayerSide) {
@@ -1171,6 +1309,11 @@ export class Game {
         } else {
           if (this.chargeSystem2 && this.comboSystem2) {
             const combo2 = this.comboSystem2.getCombo();
+
+    const destroyedBulletCount = Math.max(0, destroyableNearby.length - Math.min(transferCount, destroyableNearby.length));
+    if (destroyedBulletCount > 0) {
+      this.getScoreSystem(side).addBulletClear(destroyedBulletCount);
+    }
             const mult2 = combo2 > 20 ? 2 : combo2 > 10 ? 1.5 : 1;
             this.chargeSystem2.addCharge(1 * mult2);
           }
@@ -1225,43 +1368,20 @@ export class Game {
   }
 
   private onBossKilled(side: PlayerSide) {
-    if (side === 'left') {
-      this.chargeSystem1.addCharge(30);
-      return;
-    }
+    const comboSystem = this.getComboSystem(side);
+    const scoreSystem = this.getScoreSystem(side);
+    const chargeSystem = this.getChargeSystem(side);
 
-    if (this.chargeSystem2) {
-      this.chargeSystem2.addCharge(30);
-    }
+    comboSystem.increment();
+    scoreSystem.addBossKill();
+    chargeSystem.addCharge(30);
   }
   
   triggerBoss(side: PlayerSide, aircraftType: AircraftType = 'scatter', skillTokenId?: number) {
     if (this.boss) {
       this.removeBoss();
     }
-
-    const bossX = side === 'left'
-      ? this.SCREEN_WIDTH * 0.25
-      : this.SCREEN_WIDTH * 0.75;
-
-    switch (aircraftType) {
-      case 'scatter':
-        this.boss = new ScatterBoss(bossX, 100, side);
-        break;
-      case 'laser':
-        this.boss = new LaserBoss(bossX, 100, side);
-        break;
-      case 'tracking':
-        this.boss = new TrackingBoss(bossX, 100, side);
-        break;
-      default:
-        this.boss = new ScatterBoss(bossX, 100, side);
-        break;
-    }
-
-    if (this.boss && typeof skillTokenId === 'number') {
-      this.attachSkillBoss(this.boss, skillTokenId);
-    }
+    this.spawnBoss(side, aircraftType, skillTokenId);
   }
 
   removeBoss() {
@@ -1362,6 +1482,10 @@ export class Game {
     }
 
     if (this.player1.health <= 0 && this.player2 && this.player2.health <= 0) {
+      this.interruptCombo('left');
+      if (this.scoreSystem2) {
+        this.interruptCombo('right');
+      }
       this.gameOver = true;
       this.winnerText = '平局';
       // auto-download removed per user request
@@ -1369,6 +1493,10 @@ export class Game {
     }
 
     if (this.player1.health <= 0) {
+      this.interruptCombo('left');
+      if (this.scoreSystem2) {
+        this.interruptCombo('right');
+      }
       this.gameOver = true;
       this.winnerText = this.gameMode === 'single' ? 'AI 获胜' : '右侧玩家获胜';
       // auto-download removed per user request
@@ -1376,6 +1504,10 @@ export class Game {
     }
 
     if (this.player2 && this.player2.health <= 0) {
+      this.interruptCombo('left');
+      if (this.scoreSystem2) {
+        this.interruptCombo('right');
+      }
       this.gameOver = true;
       this.winnerText = '左侧玩家获胜';
       // auto-download removed per user request

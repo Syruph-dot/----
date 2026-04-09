@@ -9,6 +9,7 @@ export class Enemy {
   width = 96;
   height = 96;
   health = 2;
+  maxHealth = 2;
   active = true;
   
   side: PlayerSide;
@@ -89,7 +90,7 @@ export class Enemy {
     ctx.fillStyle = 'rgba(255,255,255,0.08)';
     ctx.fillRect(this.x + 14, this.y - 12, this.width - 28, 4);
     ctx.fillStyle = accent;
-    ctx.fillRect(this.x + 14, this.y - 12, (this.width - 28) * Math.max(0, this.health / 2), 4);
+    ctx.fillRect(this.x + 14, this.y - 12, (this.width - 28) * Math.max(0, this.health / Math.max(1, this.maxHealth)), 4);
     ctx.restore();
   }
   

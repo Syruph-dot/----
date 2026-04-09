@@ -17,14 +17,17 @@ export class ComboSystem {
     this.comboTimer = 0;
   }
   
-  update(deltaTime: number) {
+  update(deltaTime: number): boolean {
     if (this.combo > 0) {
       this.comboTimer += deltaTime;
       
       if (this.comboTimer >= this.comboTimeout) {
         this.reset();
+        return true;
       }
     }
+
+    return false;
   }
   
   getChargeBonus(): number {
