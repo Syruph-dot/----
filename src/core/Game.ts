@@ -42,7 +42,8 @@ export class Game {
   
   private player1: Player;
   private player2: Player | null = null;
-  private aiController: AIController | null = null;
+  private aiControllerLeft: AIController | null = null;
+  private aiControllerRight: AIController | null = null;
   
   private enemies: Enemy[] = [];
   private bullets: Bullet[] = [];
@@ -78,6 +79,11 @@ export class Game {
   private leftBackdropCache: HTMLCanvasElement | null = null;
   private rightBackdropCache: HTMLCanvasElement | null = null;
   private dividerCache: HTMLCanvasElement | null = null;
+  private static episodeCounter = 0;
+  private currentEpisode = 0;
+  private currentMatchId = '';
+  private simulationFrame = 0;
+  private matchStartTimestamp = 0;
   
   constructor(canvas: HTMLCanvasElement, config: Partial<GameConfig> = {}) {
     this.ctx = canvas.getContext('2d')!;
@@ -146,9 +152,8 @@ export class Game {
     );
     this.player2.setFocusEnabled(false);
 
-    if (this.gameMode === 'single') {
-      this.aiController = new AIController(this, this.player2, 'right', this.aiDifficulty);
-    }
+    this.rebuildAIControllers();
+    this.resetMatchMetadata();
     
     // logging disabled
   }
@@ -209,11 +214,8 @@ export class Game {
 
     // Recreate wave system and AI controller to reset internal counters
     this.waveSystem = new WaveSystem(this);
-    if (this.gameMode === 'single') {
-      this.aiController = new AIController(this, this.player2!, 'right', this.aiDifficulty);
-    } else {
-      this.aiController = null;
-    }
+    this.rebuildAIControllers();
+    this.resetMatchMetadata();
 
     this.lastTime = performance.now();
     this.accumulator = 0;
@@ -222,8 +224,67 @@ export class Game {
   }
 
   // Append a training event to in-memory buffer. Lightweight and safe to call frequently.
-  pushTrainingEvent(_ev: any) {
-    // Training/event recording disabled per user request — no-op
+  pushTrainingEvent(ev: any) {
+    if (!ev || typeof ev !== 'object') {
+      return;
+    }
+
+    const normalized = {
+      ...ev,
+      match_id: ev.match_id ?? this.currentMatchId,
+      episode: ev.episode ?? this.currentEpisode,
+      frame: ev.frame ?? this.simulationFrame,
+      timestamp_ms: ev.timestamp_ms ?? ev.ts ?? Date.now(),
+      game_event: ev.game_event ?? 'tick',
+    };
+
+    this.trainingEvents.push(normalized);
+
+    const maxEvents = 50000;
+    if (this.trainingEvents.length > maxEvents) {
+      this.trainingEvents.splice(0, this.trainingEvents.length - maxEvents);
+    }
+  }
+
+  flushTrainingEvents(clearAfterFlush = true): any[] {
+    const snapshot = this.trainingEvents.slice();
+    if (clearAfterFlush) {
+      this.trainingEvents.length = 0;
+    }
+    return snapshot;
+  }
+
+  private rebuildAIControllers() {
+    this.aiControllerLeft = null;
+    this.aiControllerRight = null;
+
+    if (!this.player2) {
+      return;
+    }
+
+    if (this.gameMode === 'single') {
+      this.aiControllerRight = new AIController(this, this.player2, 'right', this.aiDifficulty);
+      return;
+    }
+
+    if (this.gameMode === 'selfplay') {
+      this.aiControllerLeft = new AIController(this, this.player1, 'left', this.aiDifficulty);
+      this.aiControllerRight = new AIController(this, this.player2, 'right', this.aiDifficulty);
+    }
+  }
+
+  private resetMatchMetadata() {
+    Game.episodeCounter += 1;
+    this.currentEpisode = Game.episodeCounter;
+    this.currentMatchId = this.createMatchId();
+    this.simulationFrame = 0;
+    this.matchStartTimestamp = Date.now();
+    this.trainingEvents.length = 0;
+  }
+
+  private createMatchId(): string {
+    const rand = Math.random().toString(36).slice(2, 10);
+    return `m_${Date.now().toString(36)}_${rand}`;
   }
 
   getTrainingEventsJSONL(): string {
@@ -238,7 +299,7 @@ export class Game {
     const headers = [
       'ts', 'side', 'playerCenterX', 'playerCenterY', 'movementScore', 'threat', 'nearbyBulletCount', 'nearbyBullets',
       'chargeMax', 'currentCharge', 'selfHealth', 'opponentHealth', 'bossSide', 'bossHealth', 'bossMaxHealth', 'scenarioTags', 'rareScore',
-      'skillRequested', 'skillExecuted', 'skillMask', 'movementTargetX', 'movementTargetY'
+      'skillRequested', 'skillExecuted', 'fireDecision', 'fireBlockedReason', 'fireExecuted', 'skillMask', 'movementTargetX', 'movementTargetY'
     ];
     const escapeCell = (value: unknown) => {
       const text = value === undefined || value === null ? '' : String(value);
@@ -276,6 +337,9 @@ export class Game {
         row.rareScore ?? '',
         row.skillRequested,
         row.skillExecuted,
+        row.fireDecision,
+        row.fireBlockedReason,
+        row.fireExecuted,
         JSON.stringify(row.skillMask ?? []),
         target.x ?? '',
         target.y ?? '',
@@ -597,6 +661,8 @@ export class Game {
       return;
     }
 
+    this.simulationFrame += 1;
+
     if (this.comboSystem1.update(deltaTime)) {
       this.interruptCombo('left');
     }
@@ -611,8 +677,11 @@ export class Game {
       this.player2.update(deltaTime, this);
     }
     
-    if (this.aiController) {
-      this.aiController.update(deltaTime);
+    if (this.aiControllerLeft) {
+      this.aiControllerLeft.update(deltaTime);
+    }
+    if (this.aiControllerRight) {
+      this.aiControllerRight.update(deltaTime);
     }
     
     this.waveSystem.update(deltaTime);
@@ -797,8 +866,8 @@ export class Game {
         this.player2.getSide()
       );
 
-      if (this.aiController) {
-        const chargeIntent = this.aiController.getChargeIntent();
+      if (this.aiControllerRight) {
+        const chargeIntent = this.aiControllerRight.getChargeIntent();
         this.ctx.textAlign = 'left';
         this.ctx.fillStyle = chargeIntent.isCharging ? '#ffd166' : '#9eb2d7';
         if (chargeIntent.isCharging) {
@@ -806,6 +875,18 @@ export class Game {
           this.ctx.fillText(`AI蓄力: ${chargeIntent.skill} ${percent}%`, this.SCREEN_WIDTH - 248, 146);
         } else {
           this.ctx.fillText('AI蓄力: idle', this.SCREEN_WIDTH - 248, 146);
+        }
+      }
+
+      if (this.aiControllerLeft && this.gameMode === 'selfplay') {
+        const chargeIntent = this.aiControllerLeft.getChargeIntent();
+        this.ctx.textAlign = 'left';
+        this.ctx.fillStyle = chargeIntent.isCharging ? '#ffd166' : '#9eb2d7';
+        if (chargeIntent.isCharging) {
+          const percent = Math.round(chargeIntent.progress * 100);
+          this.ctx.fillText(`AI蓄力: ${chargeIntent.skill} ${percent}%`, 32, 146);
+        } else {
+          this.ctx.fillText('AI蓄力: idle', 32, 146);
         }
       }
     }
@@ -1342,34 +1423,17 @@ export class Game {
         const targetPlayer = bullet.side === 'left' ? this.player1 : this.player2;
 
         if (targetPlayer && this.isCollidingWithPlayerHitbox(bullet, targetPlayer)) {
-            // 支持“持续激光”样式的弹幕（bulletType === 'special' 且 isLaser），
-            // 对目标执行带冷却的重复命中；普通弹幕仍为一次性命中。
-            if (bullet.bulletType === 'special' && typeof bullet.hasHit === 'function') {
-              if (!bullet.hasHit(targetPlayer)) {
-                bullet.markHit(targetPlayer);
-                const tookDamage = targetPlayer.applyDamage(bullet.damage, this);
-                if (tookDamage) {
-                  const side = targetPlayer.getSide();
-                  if (side === 'left') {
-                    this.interruptCombo('left');
-                  } else {
-                    if (this.comboSystem2) {
-                      this.interruptCombo('right');
-                    }
-                  }
-                }
-              }
-            } else {
-              const tookDamage = targetPlayer.applyDamage(bullet.damage, this);
-              bullet.active = false;
-              if (tookDamage) {
-                const side = targetPlayer.getSide();
-                if (side === 'left') {
-                  this.interruptCombo('left');
-                } else {
-                  if (this.comboSystem2) {
-                    this.interruptCombo('right');
-                  }
+            const tookDamage = targetPlayer.applyDamage(bullet.damage, this);
+            bullet.active = false;
+
+            // 被弹幕命中时清空该侧连击
+            if (tookDamage) {
+              const side = targetPlayer.getSide();
+              if (side === 'left') {
+                this.interruptCombo('left');
+              } else {
+                if (this.comboSystem2) {
+                  this.interruptCombo('right');
                 }
               }
             }
@@ -1815,6 +1879,22 @@ export class Game {
     return this.enemies.some(e => e.active);
   }
 
+  private finalizeMatchTraining(winner: 'left' | 'right' | 'draw') {
+    this.pushTrainingEvent({
+      game_event: 'game_end',
+      winner,
+      duration_ms: Math.max(0, Date.now() - this.matchStartTimestamp),
+      left_health: this.player1.health,
+      right_health: this.player2?.health ?? null,
+      mode: this.gameMode,
+      difficulty: this.aiDifficulty,
+    });
+
+    if (this.gameMode === 'selfplay' && this.trainingEvents.length > 0) {
+      this.downloadTrainingEvents('jsonl');
+    }
+  }
+
   private updateGameOverState() {
     // logging disabled
 
@@ -1829,7 +1909,7 @@ export class Game {
       }
       this.gameOver = true;
       this.winnerText = '平局';
-      // auto-download removed per user request
+      this.finalizeMatchTraining('draw');
       return;
     }
 
@@ -1839,8 +1919,8 @@ export class Game {
         this.interruptCombo('right');
       }
       this.gameOver = true;
-      this.winnerText = this.gameMode === 'single' ? 'AI 获胜' : '右侧玩家获胜';
-      // auto-download removed per user request
+      this.winnerText = this.gameMode === 'single' || this.gameMode === 'selfplay' ? '右侧获胜' : '右侧玩家获胜';
+      this.finalizeMatchTraining('right');
       return;
     }
 
@@ -1850,8 +1930,8 @@ export class Game {
         this.interruptCombo('right');
       }
       this.gameOver = true;
-      this.winnerText = '左侧玩家获胜';
-      // auto-download removed per user request
+      this.winnerText = this.gameMode === 'selfplay' ? '左侧获胜' : '左侧玩家获胜';
+      this.finalizeMatchTraining('left');
     }
   }
 
@@ -1882,6 +1962,10 @@ export class Game {
   }
   
   private handleKeyDown(e: KeyboardEvent) {
+    if (this.gameMode === 'selfplay') {
+      return;
+    }
+
     switch (e.key) {
       case 'ArrowLeft':
         this.player1.movingLeft = true;
@@ -1943,6 +2027,10 @@ export class Game {
   }
   
   private handleKeyUp(e: KeyboardEvent) {
+    if (this.gameMode === 'selfplay') {
+      return;
+    }
+
     switch (e.key) {
       case 'ArrowLeft':
         this.player1.movingLeft = false;

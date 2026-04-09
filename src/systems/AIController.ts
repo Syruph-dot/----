@@ -69,6 +69,9 @@ interface AIContext {
   maxUsefulLevel: number;
 }
 
+type FireDecision = 'none' | 'stopGun';
+type FireBlockedReason = 'none' | 'skill' | 'charging' | 'postActionCooldown';
+
 export class AIController {
   private readonly game: Game;
   private readonly player: Player;
@@ -84,6 +87,9 @@ export class AIController {
   public lastSkillMask: boolean[] = [];
   public lastSkillRequested: SkillId = 'none';
   public lastSkillExecuted: SkillId = 'none';
+  public lastFireDecision: FireDecision = 'none';
+  public lastFireBlockedReason: FireBlockedReason = 'none';
+  public lastFireExecuted: 'none' | 'shoot' = 'none';
 
   // Backward-compatible UI hook used by Game HUD.
   getChargeIntent(): { isCharging: boolean; progress: number; skill: string } {
@@ -136,13 +142,24 @@ export class AIController {
       // console.debug('[AI] skillMask', this.lastSkillMask);
     }
 
-    const skillRequested = this.selectSkillRequest(context, movementPlan);
+    let skillRequested = this.selectSkillRequest(context, movementPlan);
+    let skillExecuted = this.executeRequestedSkill(skillRequested);
+
     this.lastSkillRequested = skillRequested;
-    const skillExecuted = this.executeRequestedSkill(skillRequested);
     this.lastSkillExecuted = skillExecuted;
     if (skillExecuted !== 'none') {
       this.postActionCooldownMs = Math.max(this.postActionCooldownMs, this.profile.postActionCooldownMs);
     }
+
+    const fireState = this.selectFireState(context, movementPlan, skillRequested, skillExecuted);
+    this.lastFireDecision = fireState.decision;
+    this.lastFireBlockedReason = fireState.blockedReason;
+
+    let fireExecuted: 'none' | 'shoot' = 'none';
+    if (fireState.decision === 'none' && fireState.blockedReason === 'none') {
+      fireExecuted = this.skillScheduler.triggerSkill('shoot', this.player, this.game) as 'none' | 'shoot';
+    }
+    this.lastFireExecuted = fireExecuted;
 
     // Record a lightweight training event for this decision tick
     try {
@@ -159,12 +176,69 @@ export class AIController {
         skillMask: this.lastSkillMask,
         skillRequested,
         skillExecuted,
+        fireDecision: fireState.decision,
+        fireBlockedReason: fireState.blockedReason,
+        fireExecuted,
       });
     } catch (e) {
       // swallow to avoid impacting game loop
     }
 
     this.applyMovementPlan(movementPlan);
+  }
+
+  private selectFireState(
+    context: AIContext,
+    plan: MovementPlan,
+    skillRequested: SkillId,
+    skillExecuted: SkillId,
+  ): { decision: FireDecision; blockedReason: FireBlockedReason } {
+    if (this.charging) {
+      return { decision: 'none', blockedReason: 'charging' };
+    }
+
+    if (this.postActionCooldownMs > 0) {
+      return { decision: 'none', blockedReason: 'postActionCooldown' };
+    }
+
+    if (skillRequested !== 'none' || skillExecuted !== 'none') {
+      return { decision: 'none', blockedReason: 'skill' };
+    }
+
+    if (this.shouldStopGun(context, plan)) {
+      return { decision: 'stopGun', blockedReason: 'none' };
+    }
+
+    return { decision: 'none', blockedReason: 'none' };
+  }
+
+  private shouldStopGun(context: AIContext, plan: MovementPlan): boolean {
+    const bossOnMySide = Boolean(context.boss && context.boss.side === this.side && context.boss.canTakeDamage());
+    const hasTargets = context.enemies.length > 0 || bossOnMySide;
+    if (!hasTargets) {
+      // No visible targets — safe to stop firing.
+      return true;
+    }
+
+    // Make stop-gun decision stricter:
+    // - Require a lower opportunity to trigger (harder to consider "low")
+    // - Require a higher threat level for density-based stops
+    // - Require more nearby bullets for density checks
+    const lowOpportunity = plan.opportunity < 0.25; // tightened from 0.35
+    const veryHighThreat = context.currentThreat >= (this.profile.panicThreatThreshold * 1.25);
+    const denseBullets = context.nearbyBulletCount >= Math.max(6, Math.floor(this.profile.bombNearbyThreshold * 0.8));
+
+    // Only stop when threat is very high and bullets are dense.
+    if (veryHighThreat && denseBullets) {
+      return true;
+    }
+
+    // Also stop when opportunity is very low and threat is at or above panic threshold.
+    if (lowOpportunity && context.currentThreat >= this.profile.panicThreatThreshold) {
+      return true;
+    }
+
+    return false;
   }
 
   private selectSkillRequest(context: AIContext, plan: MovementPlan): SkillId {

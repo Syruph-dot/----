@@ -175,6 +175,7 @@ function mountStartMenu(onStart: (config: GameConfig) => void) {
 		[
 			{ value: 'single', label: '单人 vs AI' },
 			{ value: 'dual', label: '双人对战' },
+			{ value: 'selfplay', label: '自博弈（AI vs AI）' },
 		],
 		'single'
 	);
@@ -201,8 +202,9 @@ function mountStartMenu(onStart: (config: GameConfig) => void) {
 
 	modeSelect.addEventListener('change', () => {
 		const mode = modeSelect.value as GameMode;
-		difficultyField.style.opacity = mode === 'single' ? '1' : '0.45';
-		difficultySelect.disabled = mode !== 'single';
+		const aiMode = mode === 'single' || mode === 'selfplay';
+		difficultyField.style.opacity = aiMode ? '1' : '0.45';
+		difficultySelect.disabled = !aiMode;
 	});
 
 	const startButton = createButton('开始游戏', '#e94560');
