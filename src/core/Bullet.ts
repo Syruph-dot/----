@@ -20,6 +20,18 @@ export class Bullet {
   damage: number;
   side: PlayerSide;  // 弹幕需要side来标识属于哪方
 
+  private _moveDirX = 0;
+  private _moveDirY = 1;
+  private _baseSpeed = 0;
+  private _accelPulse: {
+    delayMs: number;
+    elapsedMs: number;
+    accelMs: number;
+    decelMs: number;
+    baseSpeed: number;
+    peakSpeed: number;
+  } | null = null;
+
   private isTransferring = false;
   private transferTime = 0;
   private transferDuration = 750;
@@ -113,6 +125,7 @@ export class Bullet {
     }
     this.damage = damage;
     this.side = side;
+    this.syncMotionStateFromVelocity();
   }
 
   update(deltaTime: number) {
@@ -188,10 +201,55 @@ export class Bullet {
           this.active = false;
         }
       } else {
+        this.updateAccelPulse(deltaTime);
         this.x += this.vx;
         this.y += this.vy;
       }
     }
+  }
+
+  aimAt(x: number, y: number): void {
+    const centerX = this.x + this.width / 2;
+    const centerY = this.y + this.height / 2;
+    const dx = x - centerX;
+    const dy = y - centerY;
+    const length = Math.hypot(dx, dy);
+
+    if (length <= 0.0001) {
+      return;
+    }
+
+    const speed = Math.hypot(this.vx, this.vy) || this._baseSpeed;
+    this._moveDirX = dx / length;
+    this._moveDirY = dy / length;
+    this._baseSpeed = speed;
+    this.vx = this._moveDirX * speed;
+    this.vy = this._moveDirY * speed;
+  }
+
+  startAccelPulse(
+    delayMs: number,
+    accelMs = 500,
+    decelMs = 500,
+    peakFactor = 1.5,
+  ): void {
+    const speed = Math.hypot(this.vx, this.vy) || this._baseSpeed;
+    if (speed <= 0.0001) {
+      this._accelPulse = null;
+      return;
+    }
+
+    this._moveDirX = this.vx / speed;
+    this._moveDirY = this.vy / speed;
+    this._baseSpeed = speed;
+    this._accelPulse = {
+      delayMs: Math.max(0, Math.floor(delayMs)),
+      elapsedMs: 0,
+      accelMs: Math.max(0, Math.floor(accelMs)),
+      decelMs: Math.max(0, Math.floor(decelMs)),
+      baseSpeed: speed,
+      peakSpeed: Math.max(speed, speed * Math.max(1, peakFactor)),
+    };
   }
 
   startLaser(
@@ -793,6 +851,56 @@ export class Bullet {
     this.postTransferAimTarget = aimTarget ?? null;
     // 清除以往的命中记录，确保转移后可以对新目标造成伤害
     this.clearHitTargets();
+  }
+
+  private syncMotionStateFromVelocity() {
+    const speed = Math.hypot(this.vx, this.vy);
+    this._baseSpeed = speed;
+    if (speed > 0.0001) {
+      this._moveDirX = this.vx / speed;
+      this._moveDirY = this.vy / speed;
+      return;
+    }
+
+    this._moveDirX = 0;
+    this._moveDirY = 1;
+  }
+
+  private updateAccelPulse(deltaTime: number) {
+    const pulse = this._accelPulse;
+    if (!pulse) {
+      return;
+    }
+
+    pulse.elapsedMs += Math.max(0, deltaTime);
+    if (pulse.elapsedMs < pulse.delayMs) {
+      this.applyMovementSpeed(pulse.baseSpeed);
+      return;
+    }
+
+    const activeMs = pulse.elapsedMs - pulse.delayMs;
+    let currentSpeed = pulse.baseSpeed;
+
+    if (pulse.accelMs <= 0 && pulse.decelMs <= 0) {
+      currentSpeed = pulse.baseSpeed;
+      this._accelPulse = null;
+    } else if (activeMs < pulse.accelMs) {
+      const progress = pulse.accelMs <= 0 ? 1 : activeMs / pulse.accelMs;
+      currentSpeed = pulse.baseSpeed + (pulse.peakSpeed - pulse.baseSpeed) * progress;
+    } else if (activeMs < pulse.accelMs + pulse.decelMs) {
+      const progress = pulse.decelMs <= 0 ? 1 : (activeMs - pulse.accelMs) / pulse.decelMs;
+      currentSpeed = pulse.peakSpeed - (pulse.peakSpeed - pulse.baseSpeed) * progress;
+    } else {
+      currentSpeed = pulse.baseSpeed;
+      this._accelPulse = null;
+    }
+
+    this.applyMovementSpeed(currentSpeed);
+  }
+
+  private applyMovementSpeed(speed: number) {
+    this.vx = this._moveDirX * speed;
+    this.vy = this._moveDirY * speed;
   }
 
   clearHitTargets(): void {

@@ -248,6 +248,26 @@ function makeDecisionFromOutputs(outputValues: ArrayLike<unknown>, labels: Nativ
   throw new Error('Native policy model did not return enough outputs to build an action decision.');
 }
 
+function makeDecisionFromOutputMap(
+  outputMap: Record<string, unknown>,
+  manifest: NativePolicyManifest,
+): PolicyDecision {
+  const namedMove = outputMap[manifest.model.outputNames.move] ?? outputMap.move_logits ?? outputMap.move ?? null;
+  const namedFire = outputMap[manifest.model.outputNames.fire] ?? outputMap.fire_logits ?? outputMap.fire ?? null;
+  const namedSkill = outputMap[manifest.model.outputNames.skill] ?? outputMap.skill_logits ?? outputMap.skill ?? null;
+
+  if (namedMove && namedFire && namedSkill) {
+    return makeDecisionFromLogits(
+      tensorToNumbers(namedMove),
+      tensorToNumbers(namedFire),
+      tensorToNumbers(namedSkill),
+      manifest.outputLabels,
+    );
+  }
+
+  return makeDecisionFromOutputs(Object.values(outputMap), manifest.outputLabels);
+}
+
 class OnnxPolicyAdapter implements PolicyDecisionProvider {
   private readonly ort: any;
   private readonly session: any;
@@ -271,10 +291,9 @@ class OnnxPolicyAdapter implements PolicyDecisionProvider {
     let decision: PolicyDecision | null = null;
     try {
       const outputMap = await this.session.run({ [inputName]: inputTensor });
-      const outputValues = Object.values(outputMap);
-      decision = makeDecisionFromOutputs(outputValues, this.manifest.outputLabels);
+      decision = makeDecisionFromOutputMap(outputMap as Record<string, unknown>, this.manifest);
 
-      for (const outputTensor of outputValues) {
+      for (const outputTensor of Object.values(outputMap)) {
         if (typeof (outputTensor as any)?.dispose === 'function') {
           (outputTensor as any).dispose();
         }
@@ -339,6 +358,36 @@ function pickFileByName(files: AnyFile[], expectedName: string): AnyFile | null 
   return files.find((file) => getFilePath(file).endsWith(normalized)) ?? null;
 }
 
+function getParentDirectory(path: string): string {
+  const normalized = path.replace(/\\/g, '/').toLowerCase();
+  const index = normalized.lastIndexOf('/');
+  return index >= 0 ? normalized.slice(0, index + 1) : '';
+}
+
+function resolveFileByRelativePath(files: AnyFile[], baseDir: string, relativePath: string): AnyFile | null {
+  const normalizedBaseDir = baseDir.replace(/\\/g, '/').toLowerCase();
+  const normalizedRelativePath = relativePath.replace(/\\/g, '/').toLowerCase();
+  const directPath = `${normalizedBaseDir}${normalizedRelativePath}`.replace(/\/+/g, '/');
+
+  return files.find((file) => {
+    const filePath = getFilePath(file);
+    return filePath === directPath || filePath === normalizedRelativePath || filePath.endsWith(`/${normalizedRelativePath}`);
+  }) ?? null;
+}
+
+function concatArrayBuffers(buffers: ArrayBuffer[]): ArrayBuffer {
+  const totalLength = buffers.reduce((sum, buffer) => sum + buffer.byteLength, 0);
+  const merged = new Uint8Array(totalLength);
+  let offset = 0;
+
+  for (const buffer of buffers) {
+    merged.set(new Uint8Array(buffer), offset);
+    offset += buffer.byteLength;
+  }
+
+  return merged.buffer;
+}
+
 async function loadJsonPolicy(files: AnyFile[]): Promise<PolicyLoadResult> {
   for (const file of files.filter(isJsonLikeFile)) {
     const parsed = await parseJsonFile(file);
@@ -394,7 +443,8 @@ async function loadOnnxPolicy(files: AnyFile[]): Promise<PolicyLoadResult> {
   const { manifest, label } = await loadNativeManifest(files);
   const ort = await import('onnxruntime-web');
   const ortAny = ort as any;
-  if (ortAny?.env?.wasm && !ortAny.env.wasm.wasmPaths) {
+  const isBrowserRuntime = typeof window !== 'undefined' && typeof document !== 'undefined';
+  if (isBrowserRuntime && ortAny?.env?.wasm && !ortAny.env.wasm.wasmPaths) {
     ortAny.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.24.3/dist/';
   }
 
@@ -419,7 +469,49 @@ async function loadTfjsPolicy(files: AnyFile[]): Promise<PolicyLoadResult> {
 
   const { manifest, label } = await loadNativeManifest(files);
   const tf = await import('@tensorflow/tfjs');
-  const model = await tf.loadLayersModel(tf.io.browserFiles(files as unknown as File[]));
+  const modelJson = await parseJsonFile(modelFile) as {
+    format?: string;
+    generatedBy?: string;
+    convertedBy?: string;
+    modelTopology?: unknown;
+    weightsManifest?: Array<{ paths?: string[]; weights?: unknown[] }>;
+    trainingConfig?: unknown;
+  };
+
+  if (!modelJson || typeof modelJson !== 'object' || !modelJson.modelTopology) {
+    throw new Error('TFJS model.json is missing modelTopology.');
+  }
+
+  const weightsManifest = Array.isArray(modelJson.weightsManifest) ? modelJson.weightsManifest : [];
+  const weightSpecs = weightsManifest.flatMap((group) => Array.isArray(group.weights) ? group.weights : []);
+  const weightBuffers: ArrayBuffer[] = [];
+  const modelBaseDir = getParentDirectory(getFilePath(modelFile));
+
+  for (const group of weightsManifest) {
+    const paths = Array.isArray(group.paths) ? group.paths : [];
+    for (const shardPath of paths) {
+      const shardFile = resolveFileByRelativePath(files, modelBaseDir, shardPath);
+      if (!shardFile) {
+        throw new Error(`TFJS weight shard not found: ${shardPath}`);
+      }
+
+      weightBuffers.push(await shardFile.arrayBuffer());
+    }
+  }
+
+  const ioHandler = {
+    load: async () => ({
+      modelTopology: modelJson.modelTopology,
+      weightSpecs,
+      weightData: weightBuffers.length > 0 ? concatArrayBuffers(weightBuffers) : new ArrayBuffer(0),
+      format: modelJson.format,
+      generatedBy: modelJson.generatedBy,
+      convertedBy: modelJson.convertedBy,
+      trainingConfig: modelJson.trainingConfig,
+    }),
+  };
+
+  const model = await tf.loadLayersModel(ioHandler as any);
   const provider = new TfjsPolicyAdapter(tf, model, manifest);
 
   return {

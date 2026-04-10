@@ -68,6 +68,12 @@ export class ScoreSystem {
     return banked;
   }
 
+  // Clear the pending combo slot (visible +value). Called by game when an
+  // interrupt should immediately wipe any unbanked combo points.
+  clearComboSlot() {
+    this.comboScore = 0;
+  }
+
   getComboBonusMultiplier(): number {
     return 1 + Math.min(this.comboBonusCap, this.comboScore / this.comboBonusScale);
   }

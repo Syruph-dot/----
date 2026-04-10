@@ -20,6 +20,12 @@ interface Rect {
   height: number;
 }
 
+interface HitboxCircle {
+  x: number;
+  y: number;
+  radius: number;
+}
+
 interface AIProfile {
   decisionInterval: number;
   lookAheadFrames: number;
@@ -71,8 +77,8 @@ interface AIContext {
   maxUsefulLevel: number;
 }
 
-type FireDecision = 'none' | 'stopGun';
-type FireBlockedReason = 'none' | 'skill' | 'charging' | 'postActionCooldown';
+type FireDecision = 'none';
+type FireBlockedReason = 'none' | 'skill' | 'charging' | 'postActionCooldown' | 'noTarget';
 
 export class AIController {
   private readonly game: Game;
@@ -164,6 +170,7 @@ export class AIController {
     let skillExecuted: SkillId = 'none';
     let fireState: { decision: FireDecision; blockedReason: FireBlockedReason } = { decision: 'none', blockedReason: 'none' };
     let fireExecuted: 'none' | 'shoot' = 'none';
+    const fireTargetAvailable = this.hasShootableTarget(context);
 
     if (policyDecision) {
       this.applyPolicyMovement(policyDecision.move);
@@ -176,7 +183,7 @@ export class AIController {
         this.postActionCooldownMs = Math.max(this.postActionCooldownMs, this.profile.postActionCooldownMs);
       }
 
-      fireState = this.selectPolicyFireState(policyDecision.fire, skillRequested, skillExecuted);
+      fireState = this.selectPolicyFireState(context, skillRequested, skillExecuted);
       this.lastFireDecision = fireState.decision;
       this.lastFireBlockedReason = fireState.blockedReason;
 
@@ -194,7 +201,7 @@ export class AIController {
         this.postActionCooldownMs = Math.max(this.postActionCooldownMs, this.profile.postActionCooldownMs);
       }
 
-      fireState = this.selectFireState(context, movementPlan, skillRequested, skillExecuted);
+      fireState = this.selectFireState(context, skillRequested, skillExecuted);
       this.lastFireDecision = fireState.decision;
       this.lastFireBlockedReason = fireState.blockedReason;
 
@@ -221,7 +228,7 @@ export class AIController {
         skillMask: this.lastSkillMask,
         skillRequested,
         skillExecuted,
-        fireDecision: fireState.decision,
+        fireTargetAvailable,
         fireBlockedReason: fireState.blockedReason,
         fireExecuted,
         observation,
@@ -437,7 +444,7 @@ export class AIController {
   }
 
   private selectPolicyFireState(
-    fire: PolicyDecision['fire'],
+    context: AIContext,
     skillRequested: SkillId,
     skillExecuted: SkillId,
   ): { decision: FireDecision; blockedReason: FireBlockedReason } {
@@ -453,9 +460,11 @@ export class AIController {
       return { decision: 'none', blockedReason: 'skill' };
     }
 
-    return fire === 'stopGun'
-      ? { decision: 'stopGun', blockedReason: 'none' }
-      : { decision: 'none', blockedReason: 'none' };
+    if (!this.hasShootableTarget(context)) {
+      return { decision: 'none', blockedReason: 'noTarget' };
+    }
+
+    return { decision: 'none', blockedReason: 'none' };
   }
 
   private skillLabelToId(skill: PolicyDecision['skill']): SkillId {
@@ -474,7 +483,6 @@ export class AIController {
 
   private selectFireState(
     context: AIContext,
-    plan: MovementPlan,
     skillRequested: SkillId,
     skillExecuted: SkillId,
   ): { decision: FireDecision; blockedReason: FireBlockedReason } {
@@ -490,40 +498,16 @@ export class AIController {
       return { decision: 'none', blockedReason: 'skill' };
     }
 
-    if (this.shouldStopGun(context, plan)) {
-      return { decision: 'stopGun', blockedReason: 'none' };
+    if (!this.hasShootableTarget(context)) {
+      return { decision: 'none', blockedReason: 'noTarget' };
     }
 
     return { decision: 'none', blockedReason: 'none' };
   }
 
-  private shouldStopGun(context: AIContext, plan: MovementPlan): boolean {
+  private hasShootableTarget(context: AIContext): boolean {
     const bossOnMySide = Boolean(context.boss && context.boss.side === this.side && context.boss.canTakeDamage());
-    const hasTargets = context.enemies.length > 0 || bossOnMySide;
-    if (!hasTargets) {
-      // No visible targets — safe to stop firing.
-      return true;
-    }
-
-    // Make stop-gun decision stricter:
-    // - Require a lower opportunity to trigger (harder to consider "low")
-    // - Require a higher threat level for density-based stops
-    // - Require more nearby bullets for density checks
-    const lowOpportunity = plan.opportunity < 0.25; // tightened from 0.35
-    const veryHighThreat = context.currentThreat >= (this.profile.panicThreatThreshold * 1.25);
-    const denseBullets = context.nearbyBulletCount >= Math.max(6, Math.floor(this.profile.bombNearbyThreshold * 0.8));
-
-    // Only stop when threat is very high and bullets are dense.
-    if (veryHighThreat && denseBullets) {
-      return true;
-    }
-
-    // Also stop when opportunity is very low and threat is at or above panic threshold.
-    if (lowOpportunity && context.currentThreat >= this.profile.panicThreatThreshold) {
-      return true;
-    }
-
-    return false;
+    return context.enemies.length > 0 || bossOnMySide;
   }
 
   // Called by Game when a new bullet is spawned. Allows the AI to react
@@ -547,14 +531,12 @@ export class AIController {
         : { x: bullet.x, y: bullet.y, width: bullet.width, height: bullet.height };
 
       const center = this.getPlayerCenter();
-      const playerRect = this.getInflatedRect(center, this.profile.threatPadding + 6);
+      const hitbox = this.getPlayerHitbox();
+      const threatHitbox = this.inflateHitbox(hitbox, this.profile.threatPadding + 6);
 
-      // If the beam doesn't intersect the player region and is far away, skip
-      if (!this.rectsOverlap(rect, playerRect)) {
-        const bx = rect.x + rect.width / 2;
-        const by = rect.y + rect.height / 2;
-        const dist = this.distance({ x: bx, y: by }, center);
-        if (dist > Math.max(rect.width, rect.height) * 1.5) return;
+      // If the beam doesn't intersect the expanded hitbox region and is far away, skip
+      if (this.getRectDistanceToHitbox(rect, threatHitbox) > Math.max(rect.width, rect.height) * 1.5) {
+        return;
       }
 
       // Choose a lateral dodge target outside beam rect if possible
@@ -619,19 +601,23 @@ export class AIController {
     if (avail.bomb) {
       const bossOnMySide = boss?.side === this.side;
       const bossOnOpponentSide = Boolean(boss && boss.side !== this.side);
+      const criticalHealth = context.selfHealthRatio <= (this.profile.lowHealthRatio * 0.8);
+      const denseBullets = context.nearbyBulletCount >= this.profile.bombNearbyThreshold;
+      const highThreat = panicThreat >= (this.profile.bombThreatThreshold * 1.15);
+      const extremeThreat = panicThreat >= (this.profile.bombThreatThreshold * 1.4);
 
-      if (bossOnMySide && (panicThreat >= this.profile.bombThreatThreshold || context.selfHealthRatio <= this.profile.lowHealthRatio)) {
+      if (bossOnMySide && (criticalHealth || (extremeThreat && denseBullets))) {
         return 'bomb';
       }
 
       if (bossOnOpponentSide && boss && boss.canTakeDamage()) {
         const bossHealthRatio = boss.health / Math.max(1, boss.maxHealth);
-        if (bossHealthRatio <= this.profile.bossBombHealthThreshold) {
+        if (bossHealthRatio <= Math.max(0.12, this.profile.bossBombHealthThreshold * 0.7) && panicThreat <= this.profile.panicThreatThreshold * 0.9) {
           return 'bomb';
         }
       }
 
-      if (context.nearbyBulletCount >= this.profile.bombNearbyThreshold && panicThreat >= this.profile.bombThreatThreshold) {
+      if (criticalHealth && denseBullets && highThreat) {
         return 'bomb';
       }
     }
@@ -644,7 +630,7 @@ export class AIController {
     if (desiredLevel >= 2 && avail.skill2) return 'skill2';
 
     // Avoid spamming level-1 by requiring an actual attack window.
-    if (desiredLevel >= 1 && avail.skill1 && plan.opportunity >= 1.15 && plan.threat <= this.profile.opportunisticBurstThreatMax) {
+    if (desiredLevel >= 1 && avail.skill1 && plan.opportunity >= 0.95 && plan.threat <= this.profile.opportunisticBurstThreatMax) {
       return 'skill1';
     }
 
@@ -704,7 +690,8 @@ export class AIController {
   }
 
   private buildContext(): AIContext {
-    const currentCenter = this.getPlayerCenter();
+    const currentHitbox = this.getPlayerHitbox();
+    const currentCenter = { x: currentHitbox.x, y: currentHitbox.y };
     const enemies = this.game
       .getEnemies(this.side)
       .filter((enemy) => enemy.active);
@@ -712,7 +699,12 @@ export class AIController {
 
     const dangerousBullets = this.getDangerousBullets();
     const currentThreat = this.computeThreatScore(currentCenter, dangerousBullets, enemies);
-    const nearbyBulletCount = dangerousBullets.filter((bullet) => this.distance(this.getBulletCenter(bullet), currentCenter) < 120).length;
+    const nearbyBulletCount = dangerousBullets.filter((bullet) => this.getRectDistanceToHitbox({
+      x: bullet.x,
+      y: bullet.y,
+      width: bullet.width,
+      height: bullet.height,
+    }, currentHitbox) < 120).length;
 
     const opponentSide = this.getOpponentSide();
     const opponentPlayer = this.game.getPlayer(opponentSide);
@@ -905,11 +897,15 @@ export class AIController {
   }
 
   private computeThreatScore(center: Vector2, bullets: Bullet[], enemies: Enemy[]): number {
-    const playerRect = this.getInflatedRect(center, this.profile.threatPadding);
+    const playerHitbox = this.inflateHitbox({
+      x: center.x,
+      y: center.y,
+      radius: this.getPlayerHitbox().radius,
+    }, this.profile.threatPadding);
     let threat = 0;
 
     for (const bullet of bullets) {
-      threat += this.computeBulletThreat(bullet, playerRect);
+      threat += this.computeBulletThreat(bullet, playerHitbox);
     }
 
     threat += this.computeEnemyBodyThreat(center, enemies);
@@ -962,7 +958,7 @@ export class AIController {
     return threat;
   }
 
-  private computeBulletThreat(bullet: Bullet, playerRect: Rect): number {
+  private computeBulletThreat(bullet: Bullet, hitbox: HitboxCircle): number {
     const lookAheadFrames = this.profile.lookAheadFrames;
     let softThreat = 0;
     const projector = (bullet as any).getProjectedThreatRect;
@@ -977,22 +973,11 @@ export class AIController {
             height: bullet.height,
           };
 
-      if (this.rectsOverlap(bulletRect, playerRect)) {
+      if (this.getRectDistanceToHitbox(bulletRect, hitbox) <= 0) {
         return 1 + ((lookAheadFrames - frame + 1) / lookAheadFrames);
       }
 
-      const horizontalGap = Math.max(
-        playerRect.x - (bulletRect.x + bulletRect.width),
-        bulletRect.x - (playerRect.x + playerRect.width),
-        0,
-      );
-      const verticalGap = Math.max(
-        playerRect.y - (bulletRect.y + bulletRect.height),
-        bulletRect.y - (playerRect.y + playerRect.height),
-        0,
-      );
-
-      const distance = Math.hypot(horizontalGap, verticalGap);
+      const distance = this.getRectDistanceToHitbox(bulletRect, hitbox);
       if (distance < 50) {
         softThreat = Math.max(softThreat, (50 - distance) / 50 * 0.45);
       }
@@ -1022,8 +1007,12 @@ export class AIController {
       return 0;
     }
 
-    if (context.selfHealthRatio <= this.profile.lowHealthRatio || context.currentThreat >= this.profile.panicThreatThreshold) {
+    if (context.selfHealthRatio <= this.profile.lowHealthRatio) {
       return Math.min(1, maxUsefulLevel);
+    }
+
+    if (context.currentThreat >= this.profile.panicThreatThreshold) {
+      return Math.min(2, maxUsefulLevel);
     }
 
     let pressure = plan.pressureScore;
@@ -1069,7 +1058,7 @@ export class AIController {
           laneSamples: 5,
           threatPadding: 22,
           threatWeight: 1.95,
-          attackWeight: 0.78,
+          attackWeight: 0.95,
           moveWeight: 0.011,
           edgeWeight: 0.32,
           randomJitter: 0.3,
@@ -1077,18 +1066,18 @@ export class AIController {
           tapHoldMs: 150,
           postActionCooldownMs: 150,
           releaseWindows: [150, 520, 940, 1380, 1760],
-          pressureThresholds: [0.8, 2.1, 3.6, 5.2],
-          pressureThreatPenalty: 0.6,
+          pressureThresholds: [0.65, 1.8, 3.1, 4.6],
+          pressureThreatPenalty: 0.52,
           panicThreatThreshold: 2.5,
           lowHealthRatio: 0.35,
-          enemyLaneWidth: 92,
+          enemyLaneWidth: 108,
           bossPressureBonus: 1.05,
           opponentLowHealthBonus: 0.8,
-          bombThreatThreshold: 2.3,
-          bombNearbyThreshold: 7,
+          bombThreatThreshold: 2.8,
+          bombNearbyThreshold: 9,
           bossBombHealthThreshold: 0.26,
           allowUnlimitedTopSkill: false,
-          opportunisticBurstThreatMax: 0.9,
+          opportunisticBurstThreatMax: 1.15,
           enemyBodyThreatWeight: 0.75,
           enemyBodyLookAheadFrames: 20,
           enemyBodySpeedEstimate: 3.75,
@@ -1100,7 +1089,7 @@ export class AIController {
           laneSamples: 10,
           threatPadding: 11,
           threatWeight: 3.45,
-          attackWeight: 1.75,
+          attackWeight: 2.05,
           moveWeight: 0.006,
           edgeWeight: 0.18,
           randomJitter: 0.03,
@@ -1108,18 +1097,18 @@ export class AIController {
           tapHoldMs: 80,
           postActionCooldownMs: 35,
           releaseWindows: [80, 260, 520, 790, 1050],
-          pressureThresholds: [0.2, 0.95, 1.8, 2.7],
-          pressureThreatPenalty: 0.3,
+          pressureThresholds: [0.15, 0.8, 1.55, 2.35],
+          pressureThreatPenalty: 0.24,
           panicThreatThreshold: 3.8,
           lowHealthRatio: 0.18,
-          enemyLaneWidth: 70,
+          enemyLaneWidth: 82,
           bossPressureBonus: 2.1,
           opponentLowHealthBonus: 1.8,
-          bombThreatThreshold: 3.0,
-          bombNearbyThreshold: 4,
+          bombThreatThreshold: 3.6,
+          bombNearbyThreshold: 6,
           bossBombHealthThreshold: 0.38,
           allowUnlimitedTopSkill: true,
-          opportunisticBurstThreatMax: 0.75,
+          opportunisticBurstThreatMax: 0.95,
           enemyBodyThreatWeight: 1.3,
           enemyBodyLookAheadFrames: 34,
           enemyBodySpeedEstimate: 3.75,
@@ -1132,7 +1121,7 @@ export class AIController {
           laneSamples: 6,
           threatPadding: 18,
           threatWeight: 2.35,
-          attackWeight: 1.08,
+          attackWeight: 1.45,
           moveWeight: 0.01,
           edgeWeight: 0.28,
           randomJitter: 0.15,
@@ -1140,18 +1129,18 @@ export class AIController {
           tapHoldMs: 120,
           postActionCooldownMs: 90,
           releaseWindows: [120, 430, 820, 1240, 1600],
-          pressureThresholds: [0.6, 1.85, 3.05, 4.55],
-          pressureThreatPenalty: 0.48,
+          pressureThresholds: [0.45, 1.55, 2.65, 4.05],
+          pressureThreatPenalty: 0.42,
           panicThreatThreshold: 2.9,
           lowHealthRatio: 0.28,
-          enemyLaneWidth: 84,
+          enemyLaneWidth: 98,
           bossPressureBonus: 1.35,
           opponentLowHealthBonus: 1.1,
-          bombThreatThreshold: 2.8,
-          bombNearbyThreshold: 6,
+          bombThreatThreshold: 3.4,
+          bombNearbyThreshold: 8,
           bossBombHealthThreshold: 0.3,
           allowUnlimitedTopSkill: false,
-          opportunisticBurstThreatMax: 0.85,
+          opportunisticBurstThreatMax: 1.05,
           enemyBodyThreatWeight: 1,
           enemyBodyLookAheadFrames: 26,
           enemyBodySpeedEstimate: 3.75,
@@ -1164,10 +1153,15 @@ export class AIController {
   }
 
   private getPlayerCenter(): Vector2 {
+    const hitbox = this.getPlayerHitbox();
     return {
-      x: this.player.x + this.player.width / 2,
-      y: this.player.y + this.player.height / 2,
+      x: hitbox.x,
+      y: hitbox.y,
     };
+  }
+
+  private getPlayerHitbox(): HitboxCircle {
+    return this.player.getHitbox();
   }
 
   private getBulletCenter(bullet: Bullet): Vector2 {
@@ -1184,6 +1178,20 @@ export class AIController {
       width: this.player.width + padding * 2,
       height: this.player.height + padding * 2,
     };
+  }
+
+  private inflateHitbox(hitbox: HitboxCircle, padding: number): HitboxCircle {
+    return {
+      x: hitbox.x,
+      y: hitbox.y,
+      radius: hitbox.radius + padding,
+    };
+  }
+
+  private getRectDistanceToHitbox(rect: Rect, hitbox: HitboxCircle): number {
+    const nearestX = Math.max(rect.x, Math.min(hitbox.x, rect.x + rect.width));
+    const nearestY = Math.max(rect.y, Math.min(hitbox.y, rect.y + rect.height));
+    return Math.max(0, Math.hypot(hitbox.x - nearestX, hitbox.y - nearestY) - hitbox.radius);
   }
 
   private getSideBounds() {

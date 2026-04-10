@@ -65,6 +65,20 @@ The trained `policy.json` can be loaded by `src/main.ts` in the browser start me
 
 ## Native Model Loading
 
+Native loaders now support two runtime formats:
+
+1. `ONNX native`: a `.onnx` file plus `policy.meta.json`, or reuse the exported `policy.json` as the shared manifest.
+2. `TFJS native`: a `model.json` plus weight shards plus `policy.meta.json`, or reuse the exported `policy.json` as the shared manifest.
+
+You can validate either path with:
+
+```bash
+pnpm run policy:native-smoke -- --source onnx --dir <native-model-folder>
+pnpm run policy:native-smoke -- --source tfjs --dir <native-model-folder>
+```
+
+## Native Model Loading
+
 The runtime now supports three policy sources:
 
 1. `JSON policy`: the BC export produced by `scripts/train_bc.py`.

@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "headless": "tsx scripts/headless-runner.ts",
     "evolve": "tsx scripts/evolution-batch.ts",
-    "policy:smoke": "tsx scripts/policy-smoke.ts"
+    "policy:smoke": "tsx scripts/policy-smoke.ts",
+    "policy:native-smoke": "tsx scripts/policy-native-smoke.ts"
   },
   "keywords": [
     "game",

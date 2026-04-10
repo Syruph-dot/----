@@ -68,7 +68,7 @@ export class ScatterBoss extends Boss {
 
   private firePhase1Burst(game: Game) {
     const startX = this.x + this.width / 2;
-    const startY = this.y + this.height;
+    const startY = this.y + this.height / 2;
     const baseAngleDeg = this.phase1BaseAngleDeg;
 
     emitPatternBullets(
@@ -115,7 +115,7 @@ export class ScatterBoss extends Boss {
 
   private shootScatterLegacy(game: Game) {
     const centerX = this.x + this.width / 2;
-    const originY = this.y + this.height;
+    const originY = this.y + this.height / 2;
     emitPatternBullets(
       {
         kind: 'composite',

@@ -62,9 +62,20 @@ export type PatternFan = {
   child?: BulletPattern;
 };
 
+export type BloomPattern = {
+  kind: 'bloom';
+  count: number;
+  perBulletIntervalMs?: number;
+  dThetaDeg: number;
+  baseAngleDeg?: number;
+  centerDirectionDeg?: number;
+  baseSpeed: number;
+  shape?: FanShape;
+};
+
 export type PatternComposite = {
   kind: 'composite';
   patterns: BulletPattern[];
 };
 
-export type BulletPattern = PatternSingle | PatternChain | PatternFan | PatternComposite;
+export type BulletPattern = PatternSingle | PatternChain | PatternFan | BloomPattern | PatternComposite;

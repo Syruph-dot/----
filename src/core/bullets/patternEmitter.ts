@@ -3,6 +3,7 @@ import {
   BulletEmission,
   BulletPattern,
   BulletSpawnSpec,
+  BloomPattern,
   PatternChain,
   PatternFan,
   PatternSeed,
@@ -105,6 +106,58 @@ const fanSpeedFor = (node: PatternFan, angleDeg: number): number => {
   return node.baseSpeed;
 };
 
+const bloomEmissions = (node: BloomPattern, seed: InternalSeed): BulletEmission[] => {
+  const count = clampCount(node.count);
+  const interval = Math.max(0, node.perBulletIntervalMs ?? 70);
+  const baseDirection = typeof node.baseAngleDeg === 'number'
+    ? node.baseAngleDeg
+    : resolveDirection(node.centerDirectionDeg, seed.directionDeg);
+  const speed = node.baseSpeed;
+
+  const emissions: BulletEmission[] = [];
+  for (let i = 0; i < count; i++) {
+    emissions.push({
+      delayMs: seed.delayMs + i * interval,
+      spec: {
+        x: seed.originX,
+        y: seed.originY,
+        directionDeg: baseDirection + i * node.dThetaDeg,
+        speed,
+        side: seed.side,
+        category: seed.category,
+        bulletType: seed.bulletType,
+        canBeDestroyed: seed.canBeDestroyed,
+        width: seed.width,
+        height: seed.height,
+        damage: seed.damage,
+      },
+    });
+  }
+
+  return emissions;
+};
+
+export const createBloomPattern = (options: {
+  count: number;
+  perBulletIntervalMs?: number;
+  dThetaDeg: number;
+  baseAngleDeg?: number;
+  centerDirectionDeg?: number;
+  baseSpeed: number;
+  shape?: 'circle' | 'line';
+}): BloomPattern => {
+  return {
+    kind: 'bloom',
+    count: clampCount(options.count),
+    perBulletIntervalMs: Math.max(0, options.perBulletIntervalMs ?? 70),
+    dThetaDeg: options.dThetaDeg,
+    baseAngleDeg: options.baseAngleDeg,
+    centerDirectionDeg: options.centerDirectionDeg,
+    baseSpeed: options.baseSpeed,
+    shape: options.shape,
+  };
+};
+
 const flatten = (pattern: BulletPattern, seed: InternalSeed): BulletEmission[] => {
   if (pattern.kind === 'single') {
     return [resolveSingle(pattern, seed)];
@@ -140,6 +193,10 @@ const flatten = (pattern: BulletPattern, seed: InternalSeed): BulletEmission[] =
     }
 
     return all;
+  }
+
+  if (pattern.kind === 'bloom') {
+    return bloomEmissions(pattern, seed);
   }
 
   const angles = fanAngles(pattern);

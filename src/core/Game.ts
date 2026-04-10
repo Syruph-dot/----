@@ -437,7 +437,7 @@ export class Game {
     const headers = [
       'ts', 'side', 'playerCenterX', 'playerCenterY', 'movementScore', 'threat', 'nearbyBulletCount', 'nearbyBullets',
       'chargeMax', 'currentCharge', 'selfHealth', 'opponentHealth', 'bossSide', 'bossHealth', 'bossMaxHealth', 'scenarioTags', 'rareScore',
-      'skillRequested', 'skillExecuted', 'fireDecision', 'fireBlockedReason', 'fireExecuted', 'skillMask', 'movementTargetX', 'movementTargetY'
+      'skillRequested', 'skillExecuted', 'fireTargetAvailable', 'fireBlockedReason', 'fireExecuted', 'skillMask', 'movementTargetX', 'movementTargetY'
     ];
     const escapeCell = (value: unknown) => {
       const text = value === undefined || value === null ? '' : String(value);
@@ -475,7 +475,7 @@ export class Game {
         row.rareScore ?? '',
         row.skillRequested,
         row.skillExecuted,
-        row.fireDecision,
+        row.fireTargetAvailable,
         row.fireBlockedReason,
         row.fireExecuted,
         JSON.stringify(row.skillMask ?? []),
@@ -748,6 +748,9 @@ export class Game {
     const comboSystem = this.getComboSystem(side);
     comboSystem.reset();
 
+    // ensure the visible slot is cleared even if bankedScore is zero
+    scoreSystem.clearComboSlot();
+
     if (bankedScore > 0) {
       this.resolveScoreThresholds(side);
     }
@@ -938,10 +941,7 @@ export class Game {
       }
     }
     
-    this.comboSystem1.update(deltaTime);
-    if (this.comboSystem2) {
-      this.comboSystem2.update(deltaTime);
-    }
+    // combo systems updated earlier in the frame; avoid double-updating here.
     
     this.compactActiveEntities(this.bullets);
     this.compactActiveEntities(this.enemies);
