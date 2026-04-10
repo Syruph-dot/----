@@ -1,5 +1,7 @@
 import { Game } from './core/Game';
 import { AircraftType, Difficulty, GameConfig, GameMode } from './entities/types';
+import { loadPolicyFromFiles } from './systems/policy/loaders';
+import type { PolicyDecisionProvider, PolicySourceKind } from './systems/policy/types';
 
 const canvas = document.getElementById('gameCanvas') as HTMLCanvasElement;
 const container = document.getElementById('gameContainer') as HTMLDivElement;
@@ -165,6 +167,9 @@ function mountStartMenu(onStart: (config: GameConfig) => void) {
 	monitorToken++;
 	clearPanel();
 	const panel = createPanel();
+	let loadedPolicy: PolicyDecisionProvider | null = null;
+	let loadedPolicyLabel = '未加载策略';
+	let loadingPolicy = false;
 
 	const title = document.createElement('h2');
 	title.textContent = '开始对局';
@@ -197,6 +202,93 @@ function mountStartMenu(onStart: (config: GameConfig) => void) {
 
 	const player1AircraftSelect = createSelect(aircraftOptions, 'scatter');
 	const player2AircraftSelect = createSelect(aircraftOptions, 'scatter');
+	const policySourceSelect = createSelect(
+		[
+			{ value: 'json', label: 'JSON policy（policy.json）' },
+			{ value: 'onnx', label: 'ONNX native（model.onnx + policy.json/meta）' },
+			{ value: 'tfjs', label: 'TFJS native（model.json + shards + policy.json/meta）' },
+			{ value: 'auto', label: '自动检测' },
+		],
+		'json'
+	);
+	const policyInput = document.createElement('input');
+	policyInput.type = 'file';
+	policyInput.accept = '.json,.onnx,.bin,application/json';
+	policyInput.multiple = true;
+	policyInput.setAttribute('webkitdirectory', '');
+	policyInput.setAttribute('directory', '');
+	policyInput.style.width = '100%';
+	policyInput.style.color = '#d7e0ff';
+
+	const policyStatus = document.createElement('div');
+	policyStatus.textContent = '未选择文件。JSON 直接加载 policy.json；ONNX/TFJS 请选择模型文件，并可同时选 policy.json 作为共享 manifest。';
+	policyStatus.style.fontSize = '12px';
+	policyStatus.style.color = '#9fb1e6';
+	policyStatus.style.wordBreak = 'break-all';
+
+	const startButton = createButton('开始游戏', '#e94560');
+
+	const syncPolicyInputHints = () => {
+		const sourceKind = policySourceSelect.value as PolicySourceKind;
+		if (sourceKind === 'json') {
+			policyInput.accept = '.json,application/json';
+		} else if (sourceKind === 'onnx') {
+			policyInput.accept = '.onnx,.json,application/json';
+		} else if (sourceKind === 'tfjs') {
+			policyInput.accept = '.json,.bin,application/json';
+		} else {
+			policyInput.accept = '.json,.onnx,.bin,application/json';
+		}
+	};
+
+	const updateStartButtonState = () => {
+		startButton.disabled = loadingPolicy;
+		startButton.style.opacity = loadingPolicy ? '0.72' : '1';
+	};
+
+	const refreshPolicySelection = async () => {
+		const files = Array.from(policyInput.files ?? []);
+		if (files.length === 0) {
+			loadedPolicy = null;
+			loadedPolicyLabel = '未选择文件';
+			policyStatus.textContent = '未选择文件。JSON 直接加载 policy.json；ONNX/TFJS 请选择模型文件，并可同时选 policy.json 作为共享 manifest。';
+			updateStartButtonState();
+			return;
+		}
+
+		loadingPolicy = true;
+		policyStatus.textContent = '正在加载策略文件...';
+		updateStartButtonState();
+
+		try {
+			const result = await loadPolicyFromFiles(files, policySourceSelect.value as PolicySourceKind);
+			loadedPolicy = result.provider;
+			loadedPolicyLabel = `${result.kind.toUpperCase()}: ${result.label}`;
+			policyStatus.textContent = `已加载 ${loadedPolicyLabel}`;
+		} catch (error) {
+			loadedPolicy = null;
+			loadedPolicyLabel = '加载失败';
+			policyStatus.textContent = `加载失败：${error instanceof Error ? error.message : String(error)}`;
+			console.error(error);
+		}
+
+		loadingPolicy = false;
+		updateStartButtonState();
+	};
+
+	policySourceSelect.addEventListener('change', () => {
+		syncPolicyInputHints();
+		if ((policyInput.files?.length ?? 0) > 0) {
+			void refreshPolicySelection();
+		}
+	});
+
+	policyInput.addEventListener('change', () => {
+		void refreshPolicySelection();
+	});
+
+	syncPolicyInputHints();
+	updateStartButtonState();
 
 	const difficultyField = createField('AI 难度', difficultySelect);
 
@@ -207,14 +299,19 @@ function mountStartMenu(onStart: (config: GameConfig) => void) {
 		difficultySelect.disabled = !aiMode;
 	});
 
-	const startButton = createButton('开始游戏', '#e94560');
-
 	startButton.addEventListener('click', () => {
 		const config: GameConfig = {
 			mode: modeSelect.value as GameMode,
 			difficulty: difficultySelect.value as Difficulty,
 			player1Aircraft: player1AircraftSelect.value as AircraftType,
 			player2Aircraft: player2AircraftSelect.value as AircraftType,
+			agentPolicies: loadedPolicy
+				? (modeSelect.value === 'single'
+					? { right: loadedPolicy }
+					: modeSelect.value === 'selfplay'
+						? { left: loadedPolicy, right: loadedPolicy }
+						: undefined)
+				: undefined,
 		};
 
 		panel.remove();
@@ -226,6 +323,9 @@ function mountStartMenu(onStart: (config: GameConfig) => void) {
 	panel.appendChild(difficultyField);
 	panel.appendChild(createField('左侧机体', player1AircraftSelect));
 	panel.appendChild(createField('右侧机体', player2AircraftSelect));
+	panel.appendChild(createField('策略类型', policySourceSelect));
+	panel.appendChild(createField('AI 策略文件', policyInput));
+	panel.appendChild(policyStatus);
 	panel.appendChild(startButton);
 
 	container.appendChild(panel);

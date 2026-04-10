@@ -11,6 +11,7 @@ import { ScoreSystem } from '../systems/ScoreSystem';
 import { WaveSystem } from '../systems/WaveSystem';
 import { AIController } from '../systems/AIController';
 import { GameConfig, PlayerSide, AircraftType, GameMode } from '../entities/types';
+import type { PolicyDecisionProvider } from '../systems/policy/types';
 
 type ExpandingField = {
   side: PlayerSide;
@@ -30,8 +31,29 @@ type SkillLifecycle = {
   pendingCallbacks: number;
 };
 
+export type GameRuntimeAdapter = {
+  getDevicePixelRatio: () => number;
+  getViewportSize: () => { width: number; height: number };
+  now: () => number;
+  dateNow: () => number;
+  setTimeout: (callback: () => void, delayMs: number) => number;
+  clearTimeout: (id: number) => void;
+  requestAnimationFrame: (callback: (time: number) => void) => number;
+  cancelAnimationFrame: (id: number) => void;
+  addWindowListener: (type: 'keydown' | 'keyup', listener: (e: KeyboardEvent) => void) => void;
+  removeWindowListener: (type: 'keydown' | 'keyup', listener: (e: KeyboardEvent) => void) => void;
+  createElementNS: (ns: string, qualifiedName: string) => Element | null;
+  createElement: (tagName: 'a' | 'canvas') => HTMLElement | HTMLCanvasElement | null;
+  createObjectURL: (blob: Blob) => string | null;
+  revokeObjectURL: (url: string) => void;
+  advanceTime?: (deltaMs: number) => void;
+  // Optional headless file save hook (Node runtime should implement)
+  saveFile?: (content: string, filename: string, mimeType?: string) => void;
+};
+
 export class Game {
-  private ctx: CanvasRenderingContext2D;
+  private ctx: any;
+  private headless = false;
   private svgOverlay: SVGSVGElement | null = null;
   private readonly dpr: number;
   private lastTime = 0;
@@ -84,44 +106,128 @@ export class Game {
   private currentMatchId = '';
   private simulationFrame = 0;
   private matchStartTimestamp = 0;
+  private readonly runtime: GameRuntimeAdapter;
+  private readonly runSeed: string;
+  private readonly agentIds: Record<PlayerSide, string>;
+  private readonly agentPolicies: Partial<Record<PlayerSide, PolicyDecisionProvider | null>>;
+  private readonly trainingConfig: Record<string, unknown>;
+
+  private static createBrowserRuntimeAdapter(): GameRuntimeAdapter {
+    return {
+      getDevicePixelRatio: () => Math.max(1, (globalThis as any).window?.devicePixelRatio ?? 1),
+      getViewportSize: () => ({
+        width: Math.max(320, (globalThis as any).window?.innerWidth ?? 1200),
+        height: Math.max(240, (globalThis as any).window?.innerHeight ?? 800),
+      }),
+      now: () => (globalThis as any).performance?.now?.() ?? Date.now(),
+      dateNow: () => Date.now(),
+      setTimeout: (callback, delayMs) => (globalThis as any).window?.setTimeout(callback, delayMs) ?? setTimeout(callback, delayMs) as unknown as number,
+      clearTimeout: (id) => {
+        if ((globalThis as any).window?.clearTimeout) {
+          (globalThis as any).window.clearTimeout(id);
+          return;
+        }
+        clearTimeout(id as unknown as number);
+      },
+      requestAnimationFrame: (callback) => {
+        if ((globalThis as any).window?.requestAnimationFrame) {
+          return (globalThis as any).window.requestAnimationFrame(callback);
+        }
+        return setTimeout(() => callback(Date.now()), 16) as unknown as number;
+      },
+      cancelAnimationFrame: (id) => {
+        if ((globalThis as any).window?.cancelAnimationFrame) {
+          (globalThis as any).window.cancelAnimationFrame(id);
+          return;
+        }
+        clearTimeout(id as unknown as number);
+      },
+      addWindowListener: (type, listener) => {
+        (globalThis as any).window?.addEventListener?.(type, listener);
+      },
+      removeWindowListener: (type, listener) => {
+        (globalThis as any).window?.removeEventListener?.(type, listener);
+      },
+      createElementNS: (ns, qualifiedName) => {
+        return (globalThis as any).document?.createElementNS?.(ns, qualifiedName) ?? null;
+      },
+      createElement: (tagName) => {
+        return (globalThis as any).document?.createElement?.(tagName) ?? null;
+      },
+      createObjectURL: (blob) => {
+        return (globalThis as any).URL?.createObjectURL?.(blob) ?? null;
+      },
+      revokeObjectURL: (url) => {
+        (globalThis as any).URL?.revokeObjectURL?.(url);
+      },
+    };
+  }
   
-  constructor(canvas: HTMLCanvasElement, config: Partial<GameConfig> = {}) {
-    this.ctx = canvas.getContext('2d')!;
+  constructor(canvas: HTMLCanvasElement | null, config: Partial<GameConfig> = {}) {
+    this.runtime = (config as any).runtime ?? Game.createBrowserRuntimeAdapter();
     this.gameMode = config.mode ?? 'single';
     this.aiDifficulty = config.difficulty ?? 'normal';
-    this.dpr = Math.max(1, window.devicePixelRatio || 1);
-    
+    this.dpr = this.runtime.getDevicePixelRatio();
+    this.runSeed = String(config.seed ?? this.runtime.dateNow());
+    this.agentIds = {
+      left: config.agentIds?.left ?? `agent-left-${this.aiDifficulty}`,
+      right: config.agentIds?.right ?? `agent-right-${this.aiDifficulty}`,
+    };
+    this.agentPolicies = {
+      left: config.agentPolicies?.left ?? null,
+      right: config.agentPolicies?.right ?? null,
+    };
+    this.trainingConfig = {
+      mode: this.gameMode,
+      difficulty: this.aiDifficulty,
+      player1Aircraft: config.player1Aircraft ?? 'scatter',
+      player2Aircraft: config.player2Aircraft ?? 'scatter',
+      ...(config.trainingConfig ?? {}),
+    };
+
     // 缩小默认游戏画面并限制最大尺寸，避免过大画面导致敌人分布过稀
     const MAX_WIDTH = 1200;
     const MAX_HEIGHT = 800;
-    this.SCREEN_WIDTH = Math.min(window.innerWidth * 0.8, MAX_WIDTH);
-    this.SCREEN_HEIGHT = Math.min(window.innerHeight * 0.8, MAX_HEIGHT);
-    
-    canvas.style.width = `${this.SCREEN_WIDTH}px`;
-    canvas.style.height = `${this.SCREEN_HEIGHT}px`;
-    canvas.width = Math.floor(this.SCREEN_WIDTH * this.dpr);
-    canvas.height = Math.floor(this.SCREEN_HEIGHT * this.dpr);
-    this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    this.ctx.imageSmoothingEnabled = true;
+    const viewport = this.runtime.getViewportSize();
+    this.SCREEN_WIDTH = Math.min(viewport.width * 0.8, MAX_WIDTH);
+    this.SCREEN_HEIGHT = Math.min(viewport.height * 0.8, MAX_HEIGHT);
 
-    // create SVG overlay aligned on top of the canvas for player rendering
-    const container = canvas.parentElement as HTMLElement | null;
-    if (container) {
-      const svgNS = 'http://www.w3.org/2000/svg';
-      const svg = document.createElementNS(svgNS, 'svg') as SVGSVGElement;
-      svg.setAttribute('width', String(this.SCREEN_WIDTH));
-      svg.setAttribute('height', String(this.SCREEN_HEIGHT));
-      svg.style.width = `${this.SCREEN_WIDTH}px`;
-      svg.style.height = `${this.SCREEN_HEIGHT}px`;
-      svg.style.position = 'absolute';
-      svg.style.left = '0';
-      svg.style.top = '0';
-      svg.style.pointerEvents = 'none';
-      svg.style.zIndex = '5';
-      container.appendChild(svg);
-      this.svgOverlay = svg;
+    this.headless = !!(config as any).headless || !canvas;
+
+    if (!this.headless && canvas) {
+      this.ctx = canvas.getContext('2d')!;
+
+      canvas.style.width = `${this.SCREEN_WIDTH}px`;
+      canvas.style.height = `${this.SCREEN_HEIGHT}px`;
+      canvas.width = Math.floor(this.SCREEN_WIDTH * this.dpr);
+      canvas.height = Math.floor(this.SCREEN_HEIGHT * this.dpr);
+      this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      this.ctx.imageSmoothingEnabled = true;
+
+      // create SVG overlay aligned on top of the canvas for player rendering
+      const container = canvas.parentElement as HTMLElement | null;
+      if (container) {
+        const svgNS = 'http://www.w3.org/2000/svg';
+        const svg = this.runtime.createElementNS(svgNS, 'svg') as SVGSVGElement | null;
+        if (svg) {
+          svg.setAttribute('width', String(this.SCREEN_WIDTH));
+          svg.setAttribute('height', String(this.SCREEN_HEIGHT));
+          svg.style.width = `${this.SCREEN_WIDTH}px`;
+          svg.style.height = `${this.SCREEN_HEIGHT}px`;
+          svg.style.position = 'absolute';
+          svg.style.left = '0';
+          svg.style.top = '0';
+          svg.style.pointerEvents = 'none';
+          svg.style.zIndex = '5';
+          container.appendChild(svg);
+          this.svgOverlay = svg;
+        }
+      }
+    } else {
+      // Headless mode: use a lightweight stub ctx and skip DOM wiring
+      this.ctx = {};
     }
-    
+
     this.chargeSystem1 = new ChargeSystem();
     this.comboSystem1 = new ComboSystem();
     this.scoreSystem1 = new ScoreSystem();
@@ -164,7 +270,7 @@ export class Game {
     this.setupEventListeners();
 
     if (this.animationFrameId) {
-      cancelAnimationFrame(this.animationFrameId);
+      this.runtime.cancelAnimationFrame(this.animationFrameId);
       this.animationFrameId = 0;
     }
 
@@ -217,10 +323,19 @@ export class Game {
     this.rebuildAIControllers();
     this.resetMatchMetadata();
 
-    this.lastTime = performance.now();
+    this.lastTime = this.runtime.now();
     this.accumulator = 0;
-    this.render();
-    this.animationFrameId = requestAnimationFrame((t) => this.gameLoop(t));
+    if (!this.headless) this.render();
+    this.animationFrameId = this.runtime.requestAnimationFrame((t) => this.gameLoop(t));
+  }
+
+  step(deltaTime: number) {
+    if (!this.running) {
+      return;
+    }
+
+    this.update(deltaTime);
+    this.runtime.advanceTime?.(deltaTime);
   }
 
   // Append a training event to in-memory buffer. Lightweight and safe to call frequently.
@@ -234,8 +349,11 @@ export class Game {
       match_id: ev.match_id ?? this.currentMatchId,
       episode: ev.episode ?? this.currentEpisode,
       frame: ev.frame ?? this.simulationFrame,
-      timestamp_ms: ev.timestamp_ms ?? ev.ts ?? Date.now(),
+      timestamp_ms: ev.timestamp_ms ?? ev.ts ?? this.runtime.dateNow(),
       game_event: ev.game_event ?? 'tick',
+      seed: ev.seed ?? this.runSeed,
+      run_config: ev.run_config ?? this.trainingConfig,
+      agent_id: ev.agent_id ?? (typeof ev.side === 'string' ? this.getAgentId(ev.side as PlayerSide) : undefined),
     };
 
     this.trainingEvents.push(normalized);
@@ -263,13 +381,13 @@ export class Game {
     }
 
     if (this.gameMode === 'single') {
-      this.aiControllerRight = new AIController(this, this.player2, 'right', this.aiDifficulty);
+      this.aiControllerRight = new AIController(this, this.player2, 'right', this.aiDifficulty, this.agentPolicies.right ?? null);
       return;
     }
 
     if (this.gameMode === 'selfplay') {
-      this.aiControllerLeft = new AIController(this, this.player1, 'left', this.aiDifficulty);
-      this.aiControllerRight = new AIController(this, this.player2, 'right', this.aiDifficulty);
+      this.aiControllerLeft = new AIController(this, this.player1, 'left', this.aiDifficulty, this.agentPolicies.left ?? null);
+      this.aiControllerRight = new AIController(this, this.player2, 'right', this.aiDifficulty, this.agentPolicies.right ?? null);
     }
   }
 
@@ -278,13 +396,33 @@ export class Game {
     this.currentEpisode = Game.episodeCounter;
     this.currentMatchId = this.createMatchId();
     this.simulationFrame = 0;
-    this.matchStartTimestamp = Date.now();
+    this.matchStartTimestamp = this.runtime.dateNow();
     this.trainingEvents.length = 0;
   }
 
   private createMatchId(): string {
     const rand = Math.random().toString(36).slice(2, 10);
-    return `m_${Date.now().toString(36)}_${rand}`;
+    return `m_${this.runtime.dateNow().toString(36)}_${rand}`;
+  }
+
+  getRunSeed(): string {
+    return this.runSeed;
+  }
+
+  getRunConfig(): Record<string, unknown> {
+    return this.trainingConfig;
+  }
+
+  getAgentId(side: PlayerSide): string {
+    return this.agentIds[side];
+  }
+
+  getTickMetadata(side: PlayerSide) {
+    return {
+      seed: this.getRunSeed(),
+      run_config: this.getRunConfig(),
+      agent_id: this.getAgentId(side),
+    };
   }
 
   getTrainingEventsJSONL(): string {
@@ -388,23 +526,92 @@ export class Game {
       : (baseFormat === 'csv' ? 'training-events.csv' : 'training-events.jsonl');
     const mimeType = baseFormat === 'csv' ? 'text/csv;charset=utf-8' : 'application/jsonl;charset=utf-8';
 
+    this.downloadTextAsFile(content, filename, mimeType);
+  }
+
+  flushTrainingEventsToDownload(options?: {
+    format?: 'jsonl' | 'csv';
+    split?: 'none' | 'rare-full';
+    clearAfterFlush?: boolean;
+  }): string[] {
+    const format = options?.format ?? 'jsonl';
+    const split = options?.split ?? 'none';
+    const clearAfterFlush = options?.clearAfterFlush ?? true;
+    const ext = format === 'csv' ? 'csv' : 'jsonl';
+    const mimeType = format === 'csv' ? 'text/csv;charset=utf-8' : 'application/jsonl;charset=utf-8';
+
+    const snapshot = this.flushTrainingEvents(clearAfterFlush);
+    const ts = this.runtime.dateNow();
+    const safeSeed = String(this.runSeed).replace(/[^a-zA-Z0-9_-]/g, '_');
+    const base = `${this.currentMatchId}_seed-${safeSeed}_${ts}`;
+
+    const emitted: string[] = [];
+    const formatRows = (rows: any[]) => format === 'csv'
+      ? this.formatTrainingEventsCSV(rows)
+      : rows.map((event) => JSON.stringify(event)).join('\n');
+
+    const fullName = `${base}_full.${ext}`;
+    this.downloadTextAsFile(formatRows(snapshot), fullName, mimeType);
+    emitted.push(fullName);
+
+    if (split === 'rare-full') {
+      const rareRows = snapshot.filter((event) => {
+        if (typeof event?.rareScore === 'number' && event.rareScore > 0) {
+          return true;
+        }
+        const tags = Array.isArray(event?.scenarioTags) ? event.scenarioTags : [];
+        return tags.some((tag: string) => [
+          'high_threat',
+          'low_health',
+          'opponent_low_health',
+          'boss_present',
+          'boss_on_my_side',
+          'skill2_action',
+          'skill3_action',
+          'skill4_action',
+        ].includes(tag));
+      });
+
+      const rareName = `${base}_rare.${ext}`;
+      this.downloadTextAsFile(formatRows(rareRows), rareName, mimeType);
+      emitted.push(rareName);
+    }
+
+    return emitted;
+  }
+
+  private downloadTextAsFile(content: string, filename: string, mimeType: string) {
+    if (this.runtime.saveFile) {
+      this.runtime.saveFile(content, filename, mimeType);
+      return;
+    }
+
     const blob = new Blob([content], { type: mimeType });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
+    const url = this.runtime.createObjectURL(blob);
+    if (!url) {
+      return;
+    }
+
+    const link = this.runtime.createElement('a') as HTMLAnchorElement | null;
+    if (!link) {
+      this.runtime.revokeObjectURL(url);
+      return;
+    }
+
     link.href = url;
     link.download = filename;
     link.click();
-    URL.revokeObjectURL(url);
+    this.runtime.revokeObjectURL(url);
   }
 
   destroy() {
     this.running = false;
     if (this.animationFrameId) {
-      cancelAnimationFrame(this.animationFrameId);
+      this.runtime.cancelAnimationFrame(this.animationFrameId);
       this.animationFrameId = 0;
     }
     for (const timeoutId of this.managedTimeoutIds) {
-      clearTimeout(timeoutId);
+      this.runtime.clearTimeout(timeoutId);
     }
     this.managedTimeoutIds.clear();
     this.skillLifecycles.clear();
@@ -426,7 +633,7 @@ export class Game {
   }
 
   runWithLifecycle(callback: () => void, delayMs: number): number {
-    const timeoutId = window.setTimeout(() => {
+    const timeoutId = this.runtime.setTimeout(() => {
       this.managedTimeoutIds.delete(timeoutId);
       if (!this.running) {
         return;
@@ -637,7 +844,7 @@ export class Game {
 
     if (this.lastTime === 0) {
       this.lastTime = currentTime;
-      this.animationFrameId = requestAnimationFrame((t) => this.gameLoop(t));
+      this.animationFrameId = this.runtime.requestAnimationFrame((t) => this.gameLoop(t));
       return;
     }
 
@@ -647,13 +854,13 @@ export class Game {
     this.accumulator += deltaTime;
     
     while (this.accumulator >= this.fixedDeltaTime) {
-      this.update(this.fixedDeltaTime);
+      this.step(this.fixedDeltaTime);
       this.accumulator -= this.fixedDeltaTime;
     }
     
-    this.render();
+    if (!this.headless) this.render();
     
-    this.animationFrameId = requestAnimationFrame((t) => this.gameLoop(t));
+    this.animationFrameId = this.runtime.requestAnimationFrame((t) => this.gameLoop(t));
   }
   
   private update(deltaTime: number) {
@@ -996,7 +1203,7 @@ export class Game {
     // special pulsing effect when final threshold reached (either reserve cap or held to cap)
     const reachedFinal = chargeMax >= maxCharge || safeCurrent >= maxCharge;
     if (reachedFinal && filledWidth > 0) {
-      const now = performance.now();
+      const now = this.runtime.now();
       const pulse = 0.5 + 0.5 * Math.sin(now / 240);
       ctx.save();
       ctx.globalAlpha = 0.12 + 0.06 * pulse;
@@ -1057,7 +1264,7 @@ export class Game {
       this.ctx.drawImage(cache, viewport.x, viewport.y);
     }
 
-    const scanPhase = (performance.now() * 0.02) % viewport.height;
+    const scanPhase = (this.runtime.now() * 0.02) % viewport.height;
     const scanY = viewport.y + scanPhase;
     const scanGradient = this.ctx.createLinearGradient(viewport.x, scanY - 24, viewport.x, scanY + 24);
     scanGradient.addColorStop(0, 'transparent');
@@ -1083,7 +1290,10 @@ export class Game {
   }
 
   private buildSideBackdropLayer(side: PlayerSide, width: number, height: number): HTMLCanvasElement {
-    const canvas = document.createElement('canvas');
+    const canvas = this.runtime.createElement('canvas') as HTMLCanvasElement | null;
+    if (!canvas) {
+      return this.ctx.canvas;
+    }
     canvas.width = Math.max(1, Math.ceil(width));
     canvas.height = Math.max(1, Math.ceil(height));
     const ctx = canvas.getContext('2d');
@@ -1129,7 +1339,10 @@ export class Game {
   }
 
   private buildDividerLayer(width: number, height: number): HTMLCanvasElement {
-    const canvas = document.createElement('canvas');
+    const canvas = this.runtime.createElement('canvas') as HTMLCanvasElement | null;
+    if (!canvas) {
+      return this.ctx.canvas;
+    }
     const safeWidth = Math.max(1, Math.ceil(width));
     const safeHeight = Math.max(1, Math.ceil(height));
     canvas.width = safeWidth;
@@ -1777,6 +1990,23 @@ export class Game {
       return;
     }
     this.bullets.push(bullet);
+
+    // Notify AI controllers immediately so they can react to new beam/laser spawns
+    try {
+      if (this.aiControllerLeft) {
+        (this.aiControllerLeft as any).onBulletAdded?.(bullet);
+      }
+    } catch (e) {
+      // swallow
+    }
+
+    try {
+      if (this.aiControllerRight) {
+        (this.aiControllerRight as any).onBulletAdded?.(bullet);
+      }
+    } catch (e) {
+      // swallow
+    }
   }
   
   addEnemy(enemy: Enemy) {
@@ -1883,7 +2113,7 @@ export class Game {
     this.pushTrainingEvent({
       game_event: 'game_end',
       winner,
-      duration_ms: Math.max(0, Date.now() - this.matchStartTimestamp),
+      duration_ms: Math.max(0, this.runtime.dateNow() - this.matchStartTimestamp),
       left_health: this.player1.health,
       right_health: this.player2?.health ?? null,
       mode: this.gameMode,
@@ -1891,7 +2121,7 @@ export class Game {
     });
 
     if (this.gameMode === 'selfplay' && this.trainingEvents.length > 0) {
-      this.downloadTrainingEvents('jsonl');
+      this.flushTrainingEventsToDownload({ format: 'jsonl', split: 'none', clearAfterFlush: false });
     }
   }
 
@@ -1942,13 +2172,45 @@ export class Game {
   getWinnerText(): string {
     return this.winnerText;
   }
+
+  getMatchSummary() {
+    const summarizeSide = (side: PlayerSide) => {
+      const scoreSystem = this.getScoreSystem(side);
+      const comboSystem = this.getComboSystem(side);
+      const chargeSystem = this.getChargeSystem(side);
+
+      return {
+        health: side === 'left' ? this.player1.health : this.player2?.health ?? null,
+        totalScore: scoreSystem.getTotalScore(),
+        comboScore: scoreSystem.getComboScore(),
+        combo: comboSystem.getCombo(),
+        chargeMax: chargeSystem.getChargeMax(),
+        currentCharge: chargeSystem.getCurrentCharge(),
+      };
+    };
+
+    return {
+      matchId: this.currentMatchId,
+      episode: this.currentEpisode,
+      seed: this.runSeed,
+      mode: this.gameMode,
+      difficulty: this.aiDifficulty,
+      gameOver: this.gameOver,
+      winnerText: this.winnerText,
+      durationMs: Math.max(0, this.runtime.dateNow() - this.matchStartTimestamp),
+      frames: this.simulationFrame,
+      events: this.trainingEvents.length,
+      left: summarizeSide('left'),
+      right: summarizeSide('right'),
+    };
+  }
   
   private setupEventListeners() {
     if (this.listenersAttached) {
       return;
     }
-    window.addEventListener('keydown', this.keyDownListener);
-    window.addEventListener('keyup', this.keyUpListener);
+    this.runtime.addWindowListener('keydown', this.keyDownListener);
+    this.runtime.addWindowListener('keyup', this.keyUpListener);
     this.listenersAttached = true;
   }
 
@@ -1956,8 +2218,8 @@ export class Game {
     if (!this.listenersAttached) {
       return;
     }
-    window.removeEventListener('keydown', this.keyDownListener);
-    window.removeEventListener('keyup', this.keyUpListener);
+    this.runtime.removeWindowListener('keydown', this.keyDownListener);
+    this.runtime.removeWindowListener('keyup', this.keyUpListener);
     this.listenersAttached = false;
   }
   

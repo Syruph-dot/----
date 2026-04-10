@@ -1,0 +1,29 @@
+{
+  "options": {
+    "generations": 1,
+    "population": 2,
+    "episodesPerCandidate": 1,
+    "maxFrames": 3,
+    "outputDir": "D:\\OBSIDIAN\\SyrVault1\\20_项目\\飞机大战\\evolution-output-test",
+    "format": "jsonl",
+    "split": "rare-full",
+    "mode": "selfplay",
+    "difficulty": "normal",
+    "player1Aircraft": "scatter",
+    "player2Aircraft": "scatter",
+    "seed": "1775743857535",
+    "eliteRatio": 0.25,
+    "mutationRate": 0.35
+  },
+  "generations": [
+    {
+      "generation": 1,
+      "bestCandidateId": "g1-c1",
+      "bestFitness": 75.55,
+      "averageFitness": 75.55,
+      "averageCombinedScore": 0,
+      "averageRareEvents": 0
+    }
+  ],
+  "candidateCount": 2
+}

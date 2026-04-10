@@ -3,8 +3,10 @@ import { Boss } from '../core/Boss';
 import { Bullet } from '../core/Bullet';
 import { Enemy } from '../core/Enemy';
 import { Player } from '../core/Player';
-import { Difficulty, PlayerSide } from '../entities/types';
+import { Difficulty, Observation, PlayerSide } from '../entities/types';
 import { SkillId, SkillScheduler } from './SkillScheduler';
+import { MAX_BULLET_SLOTS, MAX_ENEMY_SLOTS } from './policy/featureLayout';
+import type { PolicyDecision, PolicyDecisionProvider } from './policy/types';
 
 interface Vector2 {
   x: number;
@@ -90,6 +92,13 @@ export class AIController {
   public lastFireDecision: FireDecision = 'none';
   public lastFireBlockedReason: FireBlockedReason = 'none';
   public lastFireExecuted: 'none' | 'shoot' = 'none';
+  private readonly policyProvider: PolicyDecisionProvider | null;
+  private latestPolicyDecision: PolicyDecision | null = null;
+  private policyDecisionPending = false;
+
+  // Dodge state triggered by immediate bullet spawn notifications
+  private dodgeTarget: Vector2 | null = null;
+  private dodgeRemainingMs = 0;
 
   // Backward-compatible UI hook used by Game HUD.
   getChargeIntent(): { isCharging: boolean; progress: number; skill: string } {
@@ -107,11 +116,12 @@ export class AIController {
     };
   }
 
-  constructor(game: Game, player: Player, side: PlayerSide, difficulty: Difficulty) {
+  constructor(game: Game, player: Player, side: PlayerSide, difficulty: Difficulty, policyProvider: PolicyDecisionProvider | null = null) {
     this.game = game;
     this.player = player;
     this.side = side;
     this.profile = this.getProfile(difficulty);
+    this.policyProvider = policyProvider;
   }
 
   update(deltaTime: number) {
@@ -125,6 +135,12 @@ export class AIController {
       this.chargeHoldMs += deltaTime;
     }
 
+    // Handle any active dodge window (set by onBulletAdded)
+    if (this.dodgeRemainingMs > 0) {
+      this.dodgeRemainingMs = Math.max(0, this.dodgeRemainingMs - deltaTime);
+      this.applyDodgeMovement();
+    }
+
     while (this.decisionAccumulator >= this.profile.decisionInterval) {
       this.decisionAccumulator -= this.profile.decisionInterval;
       this.makeDecision();
@@ -134,6 +150,8 @@ export class AIController {
   private makeDecision() {
     const context = this.buildContext();
     const movementPlan = this.chooseMovementPlan(context);
+    const observation = this.buildObservation(context);
+    const policyDecision: PolicyDecision | null = this.resolvePolicyDecision(observation);
 
     // build current skill availability mask for trainer / policy
     if (this.player && typeof this.player.getAvailableSkills === 'function') {
@@ -142,49 +160,316 @@ export class AIController {
       // console.debug('[AI] skillMask', this.lastSkillMask);
     }
 
-    let skillRequested = this.selectSkillRequest(context, movementPlan);
-    let skillExecuted = this.executeRequestedSkill(skillRequested);
-
-    this.lastSkillRequested = skillRequested;
-    this.lastSkillExecuted = skillExecuted;
-    if (skillExecuted !== 'none') {
-      this.postActionCooldownMs = Math.max(this.postActionCooldownMs, this.profile.postActionCooldownMs);
-    }
-
-    const fireState = this.selectFireState(context, movementPlan, skillRequested, skillExecuted);
-    this.lastFireDecision = fireState.decision;
-    this.lastFireBlockedReason = fireState.blockedReason;
-
+    let skillRequested: SkillId = 'none';
+    let skillExecuted: SkillId = 'none';
+    let fireState: { decision: FireDecision; blockedReason: FireBlockedReason } = { decision: 'none', blockedReason: 'none' };
     let fireExecuted: 'none' | 'shoot' = 'none';
-    if (fireState.decision === 'none' && fireState.blockedReason === 'none') {
-      fireExecuted = this.skillScheduler.triggerSkill('shoot', this.player, this.game) as 'none' | 'shoot';
+
+    if (policyDecision) {
+      this.applyPolicyMovement(policyDecision.move);
+      skillRequested = this.skillLabelToId(policyDecision.skill);
+      skillExecuted = this.executeRequestedSkill(skillRequested);
+
+      this.lastSkillRequested = skillRequested;
+      this.lastSkillExecuted = skillExecuted;
+      if (skillExecuted !== 'none') {
+        this.postActionCooldownMs = Math.max(this.postActionCooldownMs, this.profile.postActionCooldownMs);
+      }
+
+      fireState = this.selectPolicyFireState(policyDecision.fire, skillRequested, skillExecuted);
+      this.lastFireDecision = fireState.decision;
+      this.lastFireBlockedReason = fireState.blockedReason;
+
+      if (fireState.decision === 'none' && fireState.blockedReason === 'none') {
+        fireExecuted = this.skillScheduler.triggerSkill('shoot', this.player, this.game) as 'none' | 'shoot';
+      }
+      this.lastFireExecuted = fireExecuted;
+    } else {
+      skillRequested = this.selectSkillRequest(context, movementPlan);
+      skillExecuted = this.executeRequestedSkill(skillRequested);
+
+      this.lastSkillRequested = skillRequested;
+      this.lastSkillExecuted = skillExecuted;
+      if (skillExecuted !== 'none') {
+        this.postActionCooldownMs = Math.max(this.postActionCooldownMs, this.profile.postActionCooldownMs);
+      }
+
+      fireState = this.selectFireState(context, movementPlan, skillRequested, skillExecuted);
+      this.lastFireDecision = fireState.decision;
+      this.lastFireBlockedReason = fireState.blockedReason;
+
+      if (fireState.decision === 'none' && fireState.blockedReason === 'none') {
+        fireExecuted = this.skillScheduler.triggerSkill('shoot', this.player, this.game) as 'none' | 'shoot';
+      }
+      this.lastFireExecuted = fireExecuted;
+      this.applyMovementPlan(movementPlan);
     }
-    this.lastFireExecuted = fireExecuted;
 
     // Record a lightweight training event for this decision tick
     try {
-      const enemySummaries = context.enemies.slice(0, 6).map(e => ({ x: e.x, y: e.y, width: e.width, height: e.height, health: e.health }));
+      const tickMetadata = this.game.getTickMetadata(this.side);
       this.game.pushTrainingEvent({
         ts: Date.now(),
         side: this.side,
-        playerCenter: this.getPlayerCenter(),
+        ...tickMetadata,
+        playerCenter: observation.self.pos,
         movementTarget: movementPlan.target,
         movementScore: movementPlan.score,
         threat: context.currentThreat,
         nearbyBulletCount: context.nearbyBulletCount,
-        enemies: enemySummaries,
+        enemies: observation.enemies,
         skillMask: this.lastSkillMask,
         skillRequested,
         skillExecuted,
         fireDecision: fireState.decision,
         fireBlockedReason: fireState.blockedReason,
         fireExecuted,
+        observation,
+        policyDecision: policyDecision ? {
+          move: policyDecision.move,
+          fire: policyDecision.fire,
+          skill: policyDecision.skill,
+          confidence: policyDecision.confidence,
+        } : null,
       });
     } catch (e) {
       // swallow to avoid impacting game loop
     }
+  }
 
-    this.applyMovementPlan(movementPlan);
+  private resolvePolicyDecision(observation: Observation): PolicyDecision | null {
+    if (!this.policyProvider) {
+      return null;
+    }
+
+    if (this.policyDecisionPending) {
+      return this.latestPolicyDecision;
+    }
+
+    try {
+      const decisionOrPromise = this.policyProvider.decide(observation);
+      if (decisionOrPromise && typeof (decisionOrPromise as Promise<PolicyDecision>).then === 'function') {
+        this.policyDecisionPending = true;
+        (decisionOrPromise as Promise<PolicyDecision>)
+          .then((decision) => {
+            this.latestPolicyDecision = decision;
+          })
+          .catch((error) => {
+            console.warn('[AIController] Async policy inference failed, falling back to rule AI.', error);
+          })
+          .finally(() => {
+            this.policyDecisionPending = false;
+          });
+        return this.latestPolicyDecision;
+      }
+
+      this.latestPolicyDecision = decisionOrPromise as PolicyDecision;
+      return this.latestPolicyDecision;
+    } catch (error) {
+      console.warn('[AIController] Policy provider failed, falling back to rule AI.', error);
+      return this.latestPolicyDecision;
+    }
+  }
+
+  private buildObservation(context: AIContext): Observation {
+    const selfCenter = context.currentCenter;
+    const selfChargeSystem = this.player.getChargeSystem();
+    const opponentPlayer = this.game.getPlayer(this.getOpponentSide());
+    const opponentChargeSystem = opponentPlayer?.getChargeSystem();
+
+    const playerVelocity = {
+      vx: ((this.player.movingRight ? 1 : 0) - (this.player.movingLeft ? 1 : 0)) * this.player.speed,
+      vy: ((this.player.movingDown ? 1 : 0) - (this.player.movingUp ? 1 : 0)) * this.player.speed,
+    };
+
+    const opponentVelocity = opponentPlayer
+      ? {
+          vx: ((opponentPlayer.movingRight ? 1 : 0) - (opponentPlayer.movingLeft ? 1 : 0)) * opponentPlayer.speed,
+          vy: ((opponentPlayer.movingDown ? 1 : 0) - (opponentPlayer.movingUp ? 1 : 0)) * opponentPlayer.speed,
+        }
+      : { vx: 0, vy: 0 };
+
+    const enemySlots = this.game
+      .getEnemies(this.side)
+      .filter((enemy) => enemy.active)
+      .slice()
+      .sort((leftEnemy, rightEnemy) => this.distance(
+        { x: leftEnemy.x + leftEnemy.width / 2, y: leftEnemy.y + leftEnemy.height / 2 },
+        selfCenter,
+      ) - this.distance(
+        { x: rightEnemy.x + rightEnemy.width / 2, y: rightEnemy.y + rightEnemy.height / 2 },
+        selfCenter,
+      ))
+      .slice(0, MAX_ENEMY_SLOTS)
+      .map((enemy) => ({
+        pos: { x: enemy.x + enemy.width / 2, y: enemy.y + enemy.height / 2 },
+        width: enemy.width,
+        height: enemy.height,
+        health: enemy.health,
+        maxHealth: enemy.maxHealth,
+      }));
+
+    const allBullets = [...this.game.getBullets('left'), ...this.game.getBullets('right')]
+      .filter((bullet) => bullet.active)
+      .slice()
+      .sort((leftBullet, rightBullet) => this.distance(this.getBulletCenter(leftBullet), selfCenter) - this.distance(this.getBulletCenter(rightBullet), selfCenter))
+      .slice(0, MAX_BULLET_SLOTS)
+      .map((bullet) => ({
+        pos: { x: bullet.x + bullet.width / 2, y: bullet.y + bullet.height / 2 },
+        vel: { vx: bullet.vx ?? 0, vy: bullet.vy ?? 0 },
+        width: bullet.width,
+        height: bullet.height,
+        damage: bullet.damage,
+        category: bullet.category,
+        bulletType: bullet.bulletType,
+        side: bullet.side,
+        isBeamLike: typeof bullet.isBeamLike === 'function' ? bullet.isBeamLike() : false,
+        isWarning: !!bullet.isWarning,
+        canBeDestroyed: !!bullet.canBeDestroyed,
+        isCircular: !!bullet.isCircular,
+      }));
+
+    const boss = context.boss;
+    const bossState = boss
+      ? {
+          pos: { x: boss.x + boss.width / 2, y: boss.y + boss.height / 2 },
+          width: boss.width,
+          height: boss.height,
+          health: boss.health,
+          maxHealth: boss.maxHealth,
+          active: boss.active,
+          canTakeDamage: boss.canTakeDamage(),
+          side: boss.side,
+        }
+      : null;
+
+    return {
+      self: {
+        pos: selfCenter,
+        vel: playerVelocity,
+        health: this.player.health,
+        bombs: this.player.bombs,
+        isCharging: this.charging,
+        currentCharge: selfChargeSystem.getCurrentCharge(),
+        chargeMax: selfChargeSystem.getChargeMax(),
+        side: this.side,
+      },
+      opponent: opponentPlayer
+        ? {
+            pos: { x: opponentPlayer.x + opponentPlayer.width / 2, y: opponentPlayer.y + opponentPlayer.height / 2 },
+            vel: opponentVelocity,
+            health: opponentPlayer.health,
+            bombs: opponentPlayer.bombs,
+            isCharging: !!opponentChargeSystem && opponentChargeSystem.getCurrentCharge() > 0,
+            currentCharge: opponentChargeSystem?.getCurrentCharge() ?? 0,
+            chargeMax: opponentChargeSystem?.getChargeMax() ?? 0,
+            side: this.getOpponentSide(),
+          }
+        : null,
+      enemies: enemySlots,
+      bullets: allBullets,
+      boss: bossState,
+      arena: {
+        currentThreat: context.currentThreat,
+        nearbyBulletCount: context.nearbyBulletCount,
+        decisionIntervalMs: this.profile.decisionInterval,
+      },
+      screen: {
+        width: this.game.getScreenWidth(),
+        height: this.game.getScreenHeight(),
+        margin: this.game.getMargin(),
+      },
+      tick_ms: Date.now(),
+      decision_interval_ms: this.profile.decisionInterval,
+    };
+  }
+
+  private applyPolicyMovement(move: PolicyDecision['move']) {
+    if (this.dodgeRemainingMs > 0 && this.dodgeTarget) {
+      return;
+    }
+
+    const movementFlags = {
+      left: false,
+      right: false,
+      up: false,
+      down: false,
+    };
+
+    switch (move) {
+      case 'left':
+        movementFlags.left = true;
+        break;
+      case 'right':
+        movementFlags.right = true;
+        break;
+      case 'up':
+        movementFlags.up = true;
+        break;
+      case 'down':
+        movementFlags.down = true;
+        break;
+      case 'up-left':
+        movementFlags.left = true;
+        movementFlags.up = true;
+        break;
+      case 'up-right':
+        movementFlags.right = true;
+        movementFlags.up = true;
+        break;
+      case 'down-left':
+        movementFlags.left = true;
+        movementFlags.down = true;
+        break;
+      case 'down-right':
+        movementFlags.right = true;
+        movementFlags.down = true;
+        break;
+      case 'stay':
+      default:
+        break;
+    }
+
+    this.player.movingLeft = movementFlags.left;
+    this.player.movingRight = movementFlags.right;
+    this.player.movingUp = movementFlags.up;
+    this.player.movingDown = movementFlags.down;
+  }
+
+  private selectPolicyFireState(
+    fire: PolicyDecision['fire'],
+    skillRequested: SkillId,
+    skillExecuted: SkillId,
+  ): { decision: FireDecision; blockedReason: FireBlockedReason } {
+    if (this.charging) {
+      return { decision: 'none', blockedReason: 'charging' };
+    }
+
+    if (this.postActionCooldownMs > 0) {
+      return { decision: 'none', blockedReason: 'postActionCooldown' };
+    }
+
+    if (skillRequested !== 'none' || skillExecuted !== 'none') {
+      return { decision: 'none', blockedReason: 'skill' };
+    }
+
+    return fire === 'stopGun'
+      ? { decision: 'stopGun', blockedReason: 'none' }
+      : { decision: 'none', blockedReason: 'none' };
+  }
+
+  private skillLabelToId(skill: PolicyDecision['skill']): SkillId {
+    switch (skill) {
+      case 'skill1':
+      case 'skill2':
+      case 'skill3':
+      case 'skill4':
+      case 'bomb':
+        return skill;
+      case 'none':
+      default:
+        return 'none';
+    }
   }
 
   private selectFireState(
@@ -239,6 +524,91 @@ export class AIController {
     }
 
     return false;
+  }
+
+  // Called by Game when a new bullet is spawned. Allows the AI to react
+  // immediately to beam/laser spawns (skill2/skill3) rather than waiting
+  // for the next decision tick.
+  public onBulletAdded(bullet: Bullet) {
+    try {
+      if (!bullet || typeof bullet !== 'object') return;
+
+      // We only care about barrage/beam bullets that target this side (they
+      // are the ones that can hurt the player).
+      if (bullet.side !== this.side) return;
+
+      const isBeamLike = typeof (bullet as any).isBeamLike === 'function' && (bullet as any).isBeamLike();
+      const isBarrage = bullet.category === 'barrage';
+      if (!isBeamLike && !isBarrage) return;
+
+      // Project an immediate threat rect for the incoming bullet
+      const rect = typeof (bullet as any).getProjectedThreatRect === 'function'
+        ? (bullet as any).getProjectedThreatRect(0)
+        : { x: bullet.x, y: bullet.y, width: bullet.width, height: bullet.height };
+
+      const center = this.getPlayerCenter();
+      const playerRect = this.getInflatedRect(center, this.profile.threatPadding + 6);
+
+      // If the beam doesn't intersect the player region and is far away, skip
+      if (!this.rectsOverlap(rect, playerRect)) {
+        const bx = rect.x + rect.width / 2;
+        const by = rect.y + rect.height / 2;
+        const dist = this.distance({ x: bx, y: by }, center);
+        if (dist > Math.max(rect.width, rect.height) * 1.5) return;
+      }
+
+      // Choose a lateral dodge target outside beam rect if possible
+      const bounds = this.getSideBounds();
+      const leftSafe = this.clamp(rect.x - this.player.width - 12, bounds.minX, bounds.maxX);
+      const rightSafe = this.clamp(rect.x + rect.width + this.player.width + 12, bounds.minX, bounds.maxX);
+      const currX = center.x;
+      const leftDist = Math.abs(currX - leftSafe);
+      const rightDist = Math.abs(currX - rightSafe);
+
+      if (Math.abs(leftSafe - rightSafe) < 2) {
+        // Beam covers whole horizontal area — try vertical dodge
+        const upY = this.clamp(center.y - 80, bounds.minY, bounds.maxY);
+        const downY = this.clamp(center.y + 80, bounds.minY, bounds.maxY);
+        const upDist = Math.abs(center.y - upY);
+        const downDist = Math.abs(center.y - downY);
+        const chosenY = upDist < downDist ? upY : downY;
+        this.dodgeTarget = { x: currX, y: chosenY };
+      } else {
+        const chosenX = leftDist < rightDist ? leftSafe : rightSafe;
+        this.dodgeTarget = { x: chosenX, y: center.y };
+      }
+
+      // Set dodge duration heuristically based on beam height (ms)
+      const baseMs = 420;
+      const extra = Math.min(800, Math.floor((rect.height || 0) / 2));
+      this.dodgeRemainingMs = Math.max(this.dodgeRemainingMs, baseMs + extra);
+
+      // Apply movement immediately so AI reacts before next decision tick
+      this.applyDodgeMovement();
+    } catch (e) {
+      // swallow
+    }
+  }
+
+  private applyDodgeMovement() {
+    if (!this.dodgeTarget) return;
+    const center = this.getPlayerCenter();
+    const dx = this.dodgeTarget.x - center.x;
+    const dy = this.dodgeTarget.y - center.y;
+
+    this.player.movingLeft = dx < -this.profile.deadZone;
+    this.player.movingRight = dx > this.profile.deadZone;
+    this.player.movingUp = dy < -this.profile.deadZone;
+    this.player.movingDown = dy > this.profile.deadZone;
+
+    if (Math.abs(dx) <= this.profile.deadZone) {
+      this.player.movingLeft = false;
+      this.player.movingRight = false;
+    }
+    if (Math.abs(dy) <= this.profile.deadZone) {
+      this.player.movingUp = false;
+      this.player.movingDown = false;
+    }
   }
 
   private selectSkillRequest(context: AIContext, plan: MovementPlan): SkillId {
@@ -422,6 +792,12 @@ export class AIController {
   }
 
   private applyMovementPlan(plan: MovementPlan) {
+    // If a dodge is currently active, keep dodge movement flags set and
+    // avoid overriding them with the regular movement planner.
+    if (this.dodgeRemainingMs > 0 && this.dodgeTarget) {
+      return;
+    }
+
     const center = this.getPlayerCenter();
     const dx = plan.target.x - center.x;
     const dy = plan.target.y - center.y;
