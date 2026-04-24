@@ -58,3 +58,13 @@ __pycache__/
 
 # keep lockfiles (pnpm-lock.yaml) committed
 
+# Training outputs (generated)
+training-output/
+bc-dataset/
+bc-model/
+evolution-output/
+# Optional model artifacts (uncomment to ignore)
+# *.pt
+# *.onnx
+# policy.json
+

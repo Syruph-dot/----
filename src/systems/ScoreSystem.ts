@@ -26,6 +26,10 @@ export class ScoreSystem {
     return this.comboScore;
   }
 
+  getVisibleScore(): number {
+    return this.totalScore + this.comboScore;
+  }
+
   getNextBossThreshold(): number {
     return this.nextBossThreshold;
   }

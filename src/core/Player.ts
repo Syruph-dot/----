@@ -533,8 +533,11 @@ export class Player {
     this.bombs--;
     
     const bullets = game.getBullets(this.side);
-    const clearedBulletCount = bullets.filter(b => b.active).length;
-    bullets.forEach(b => b.active = false);
+    // Only clear bullets that are marked destroyable so some special beams/lasers
+    // can be immune to bombs.
+    const destroyable = bullets.filter(b => b.active && (b as any).canBeDestroyed);
+    const clearedBulletCount = destroyable.length;
+    destroyable.forEach(b => b.active = false);
     if (clearedBulletCount > 0) {
       game.awardBulletClear(this.side, clearedBulletCount);
     }
@@ -596,6 +599,10 @@ export class Player {
   getChargeSystem(): ChargeSystem {
     return this.chargeSystem;
   }
+
+  isChargingNow(): boolean {
+    return this.isCharging;
+  }
   
   getComboSystem(): ComboSystem {
     return this.comboSystem;
@@ -635,6 +642,7 @@ export class Player {
 
     this.health = Math.max(0, this.health - amount);
     this.isCharging = false;
+    this.chargeSystem.resetCurrentCharge();
     this.movingLeft = false;
     this.movingRight = false;
     this.movingUp = false;

@@ -209,13 +209,17 @@ def classify_move(event: dict[str, Any]) -> str:
 
 
 def classify_fire(event: dict[str, Any]) -> str:
+    fire_decision = event.get('fireDecision')
+    if fire_decision in FIRE_LABELS:
+        return str(fire_decision)
+
     fire_target_available = event.get('fireTargetAvailable')
     if fire_target_available is not None:
         return 'keepGun' if bool(fire_target_available) else 'stopGun'
 
     if event.get('fireBlockedReason') == 'noTarget':
         return 'stopGun'
-    return 'stopGun' if event.get('fireDecision') == 'stopGun' else 'keepGun'
+    return 'keepGun'
 
 
 def classify_skill(event: dict[str, Any]) -> str:

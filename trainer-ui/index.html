@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>训练器 GUI</title>
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial;max-width:980px;margin:16px auto;padding:8px}
+    label{display:block;margin:8px 0 4px}
+    input,select{width:220px;padding:6px}
+    button{margin-top:12px;padding:8px 12px}
+    pre#log{height:360px;overflow:auto;border:1px solid #ddd;padding:8px;background:#f9f9f9}
+    .controls{display:flex;gap:12px;align-items:flex-start}
+    .col{flex:1}
+  </style>
+</head>
+<body>
+  <h2>训练器 GUI — 覆盖全链路</h2>
+  <div class="controls">
+    <div class="col">
+      <label>Episodes</label>
+      <input id="episodes" type="number" value="20" />
+      <label>Headless Output Dir</label>
+      <input id="outputDir" type="text" value="training-output" />
+      <label>Format</label>
+      <select id="format"><option>jsonl</option></select>
+      <label>Split</label>
+      <select id="split"><option>rare-full</option><option>none</option></select>
+
+      <label style="margin-top:8px">BC Dataset Dir</label>
+      <input id="bcDir" type="text" value="bc-dataset" />
+      <label>Model Output Dir</label>
+      <input id="modelDir" type="text" value="bc-model" />
+
+      <label style="margin-top:8px">Epochs</label>
+      <input id="epochs" type="number" value="12" />
+      <label>Batch Size</label>
+      <input id="batchSize" type="number" value="64" />
+
+      <label style="margin-top:8px">Steps</label>
+      <div>
+        <label><input type="checkbox" id="step-headless" checked/> headless</label>
+        <label><input type="checkbox" id="step-prepare" checked/> prepare</label>
+        <label><input type="checkbox" id="step-train" checked/> train</label>
+        <label><input type="checkbox" id="step-smoke" checked/> policy:smoke</label>
+      </div>
+
+      <div style="margin-top:12px">
+        <button id="run">Run Pipeline</button>
+        <button id="cancel">Cancel</button>
+        <button id="prepare-only">生成 BC 数据集</button>
+      </div>
+    </div>
+    <div class="col">
+      <label>日志</label>
+      <pre id="log"></pre>
+    </div>
+  </div>
+
+  <script type="module" src="/main.js"></script>
+</body>
+</html>

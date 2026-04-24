@@ -12,16 +12,18 @@ interface LaserEmitterState {
 
 export class LaserBoss extends Boss {
   // Configurable parameters (adjustable by skill intensity)
-  private emitterSpawnInterval = 2000; // ms between emitter pairs
-  private emitterShootInterval = 400; // ms between emitter bursts
-  private emitterRotateStepDeg = 125; // deg step after each shot
+  private emitterSpawnInterval = 2500; // ms between emitter pairs
+  private emitterShootInterval = 1200; // ms between emitter bursts (default changed to 1.2s)
+  private emitterRotateStepDeg = 120.15; // deg step after each shot
   private emitterMoveSpeed = 2.4; // px per update step
   private emitterOutOfBoundsGrace = 300; // ms grace after leaving screen
+  // Sub-burst config: within one burst, fire this many sub-bursts spaced by emitterSubBurstIntervalMs
+  private emitterSubBurstCount = 5;
+  private emitterSubBurstIntervalMs = 70;
 
-  private laserSpeedPxPerSecond = 300;
-  private laserLengthPx = 140;
+  private laserSpeedPxPerSecond = 400;
+  private laserLengthPx = 100;
   private laserThicknessPx = 8;
-  private laserLifetimeMs = 2200;
 
   private lastEmitterSpawnTime = 0;
   private emitters: LaserEmitterState[] = [];
@@ -36,19 +38,16 @@ export class LaserBoss extends Boss {
       this.emitterSpawnInterval = 2000;
       this.emitterShootInterval = 400;
       this.emitterMoveSpeed = 2.4;
-      this.laserLifetimeMs = 2200;
     } else if (level === 3) {
       // Skill3: laser duration doubled relative to skill2
       this.emitterSpawnInterval = 2000;
       this.emitterShootInterval = 400;
       this.emitterMoveSpeed = 2.4;
-      this.laserLifetimeMs = 2200 * 2;
     } else if (level === 4) {
       // Skill4: more aggressive emitter cadence
       this.emitterSpawnInterval = 1200;
       this.emitterShootInterval = 350;
-      this.emitterMoveSpeed = 3.2;
-      this.laserLifetimeMs = 2200;
+      this.emitterMoveSpeed = 2.4;
     }
   }
 
@@ -73,7 +72,7 @@ export class LaserBoss extends Boss {
   }
 
   private spawnEmitterPair(game: Game, now: number) {
-    const d = -10 + Math.random() * 20;
+    const d = -20 + Math.random() * 40;
     const baseLeftDeg = -90 + d;
 
     this.spawnEmitter(game, baseLeftDeg, now);
@@ -111,10 +110,43 @@ export class LaserBoss extends Boss {
   }
 
   private fireEmitterBurst(game: Game, emitter: LaserEmitterState) {
-    for (let i = 0; i < 3; i++) {
-      this.fireMovingLaser(game, emitter.bullet, emitter.shootAngleDeg);
-      emitter.shootAngleDeg = this.normalizeAngleDeg(emitter.shootAngleDeg + this.emitterRotateStepDeg);
+    // Schedule multiple sub-bursts (each sub-burst performs the original 3-shot rotate burst).
+    // Use skill lifecycle callbacks if this boss has an active skill lifecycle, otherwise
+    // fall back to the game's managed timeout to ensure proper cleanup in headless mode.
+    const subCount = Math.max(1, this.emitterSubBurstCount);
+    const subInterval = Math.max(0, this.emitterSubBurstIntervalMs);
+
+    const baseAngle = emitter.shootAngleDeg;
+    // Each sub-burst advances the emitter by three rotate steps (since each sub-burst fires 3 shots)
+    const angleAdvancePerSub = this.emitterRotateStepDeg * 3;
+
+    const tokenId = this.getSkillLifecycleId();
+
+    for (let s = 0; s < subCount; s++) {
+      const scheduledStartAngle = this.normalizeAngleDeg(baseAngle + s * angleAdvancePerSub);
+      const delay = s * subInterval;
+
+      const cb = () => {
+        if (!emitter.bullet.active) {
+          return;
+        }
+
+        let angle = scheduledStartAngle;
+        for (let i = 0; i < 3; i++) {
+          this.fireMovingLaser(game, emitter.bullet, angle);
+          angle = this.normalizeAngleDeg(angle + this.emitterRotateStepDeg);
+        }
+      };
+
+      if (typeof tokenId === 'number') {
+        game.scheduleSkillLifecycleCallback(tokenId, cb, delay);
+      } else {
+        game.runWithLifecycle(cb, delay);
+      }
     }
+
+    // Advance the emitter's shoot angle to account for the scheduled shots (snapshot semantics)
+    emitter.shootAngleDeg = this.normalizeAngleDeg(baseAngle + subCount * angleAdvancePerSub);
   }
 
   private fireMovingLaser(game: Game, emitterBullet: Bullet, angleDeg: number) {
@@ -128,7 +160,7 @@ export class LaserBoss extends Boss {
       0,
       'barrage',
       'special',
-      false,
+      true,
       this.laserThicknessPx,
       this.laserThicknessPx,
       10,
@@ -148,8 +180,11 @@ export class LaserBoss extends Boss {
         maxY: viewport.y + viewport.height,
       },
       this.laserThicknessPx,
-      this.laserLifetimeMs
+      // Boss lasers: disable lifetime expiration (persist until removed by game rules)
+      Number.POSITIVE_INFINITY
     );
+    laserBullet.isBossLaser = true;
+    (laserBullet as any).ownerSide = this.ownerSide ?? (emitterBullet.side === 'left' ? 'right' : 'left');
 
     const tokenId = this.getSkillLifecycleId();
     if (typeof tokenId === 'number') {

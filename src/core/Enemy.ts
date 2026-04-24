@@ -50,8 +50,9 @@ export class Enemy {
   render(ctx: CanvasRenderingContext2D) {
     const cx = this.x + this.width / 2;
     const cy = this.y + this.height / 2;
-    const accent = this.side === 'left' ? '#59f0ff' : '#ff6f8e';
-    const accentSoft = this.side === 'left' ? 'rgba(89, 240, 255, 0.22)' : 'rgba(255, 111, 142, 0.22)';
+    // 小怪统一使用黄绿色（YellowGreen）配色，不再依据阵营
+    const accent = '#9ACD32';
+    const accentSoft = 'rgba(154, 205, 50, 0.22)';
 
     ctx.save();
     ctx.translate(cx, cy);

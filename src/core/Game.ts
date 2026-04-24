@@ -31,6 +31,13 @@ type SkillLifecycle = {
   pendingCallbacks: number;
 };
 
+type ScoreTrendState = {
+  elapsedMs: number;
+  lastVisibleScore: number;
+  cumulativePenalty: number;
+  penaltyEvents: number;
+};
+
 export type GameRuntimeAdapter = {
   getDevicePixelRatio: () => number;
   getViewportSize: () => { width: number; height: number };
@@ -111,6 +118,17 @@ export class Game {
   private readonly agentIds: Record<PlayerSide, string>;
   private readonly agentPolicies: Partial<Record<PlayerSide, PolicyDecisionProvider | null>>;
   private readonly trainingConfig: Record<string, unknown>;
+  private readonly scoreTrendWindowMs = 5000;
+  private readonly scoreTrendBaseGain = 8;
+  private readonly scoreTrendGrowthStep = 240;
+  private readonly scoreTrendMaxGain = 18;
+  private readonly scoreTrendPenaltyScale = 1.35;
+  private readonly finalScoreRewardScale = 0.08;
+  private readonly finalScoreRewardCap = 180;
+  private scoreTrendState: Record<PlayerSide, ScoreTrendState> = {
+    left: { elapsedMs: 0, lastVisibleScore: 0, cumulativePenalty: 0, penaltyEvents: 0 },
+    right: { elapsedMs: 0, lastVisibleScore: 0, cumulativePenalty: 0, penaltyEvents: 0 },
+  };
 
   private static createBrowserRuntimeAdapter(): GameRuntimeAdapter {
     return {
@@ -398,6 +416,7 @@ export class Game {
     this.simulationFrame = 0;
     this.matchStartTimestamp = this.runtime.dateNow();
     this.trainingEvents.length = 0;
+    this.resetScoreTrendTracking();
   }
 
   private createMatchId(): string {
@@ -741,6 +760,108 @@ export class Game {
     return side === 'left' ? this.chargeSystem1 : (this.chargeSystem2 ?? this.chargeSystem1);
   }
 
+  private getVisibleScore(side: PlayerSide): number {
+    return this.getScoreSystem(side).getVisibleScore();
+  }
+
+  private getScoreTrendSides(): PlayerSide[] {
+    if (this.gameMode === 'single') {
+      return ['right'];
+    }
+
+    if (this.gameMode === 'selfplay') {
+      return ['left', 'right'];
+    }
+
+    return [];
+  }
+
+  private resetScoreTrendTracking() {
+    const nextState = {} as Record<PlayerSide, ScoreTrendState>;
+    for (const side of ['left', 'right'] as const) {
+      nextState[side] = {
+        elapsedMs: 0,
+        lastVisibleScore: this.getVisibleScore(side),
+        cumulativePenalty: 0,
+        penaltyEvents: 0,
+      };
+    }
+    this.scoreTrendState = nextState;
+  }
+
+  private getScoreTrendTargetGain(side: PlayerSide): number {
+    const visibleScore = this.getVisibleScore(side);
+    const growthBonus = Math.floor(visibleScore / this.scoreTrendGrowthStep);
+    const difficultyScale = this.aiDifficulty === 'hard' ? 1.15 : this.aiDifficulty === 'easy' ? 0.9 : 1;
+    return Math.max(4, Math.min(
+      this.scoreTrendMaxGain,
+      Math.round((this.scoreTrendBaseGain + growthBonus) * difficultyScale),
+    ));
+  }
+
+  private computeFinalScoreReward(side: PlayerSide): number {
+    const visibleScore = this.getVisibleScore(side);
+    return Math.min(this.finalScoreRewardCap, Math.round(visibleScore * this.finalScoreRewardScale));
+  }
+
+  private getScoreShapingSnapshot(side: PlayerSide) {
+    const scoreSystem = this.getScoreSystem(side);
+    const trend = this.scoreTrendState[side];
+    const visibleScore = scoreSystem.getVisibleScore();
+    const finalScoreReward = this.computeFinalScoreReward(side);
+
+    return {
+      totalScore: scoreSystem.getTotalScore(),
+      comboScore: scoreSystem.getComboScore(),
+      visibleScore,
+      scoreTrendPenalty: trend.cumulativePenalty,
+      scoreTrendPenaltyEvents: trend.penaltyEvents,
+      finalScoreReward,
+      finalScoreRewardTotal: trend.cumulativePenalty + finalScoreReward,
+    };
+  }
+
+  private updateScoreTrendSignals(deltaTime: number) {
+    for (const side of this.getScoreTrendSides()) {
+      const trend = this.scoreTrendState[side];
+      trend.elapsedMs += deltaTime;
+
+      while (trend.elapsedMs >= this.scoreTrendWindowMs) {
+        trend.elapsedMs -= this.scoreTrendWindowMs;
+
+        const currentVisibleScore = this.getVisibleScore(side);
+        const scoreGain = currentVisibleScore - trend.lastVisibleScore;
+        const expectedGain = this.getScoreTrendTargetGain(side);
+
+        if (scoreGain < expectedGain) {
+          const shortfall = expectedGain - scoreGain;
+          const penalty = -Math.max(1, Math.round(shortfall * this.scoreTrendPenaltyScale));
+          trend.cumulativePenalty += penalty;
+          trend.penaltyEvents += 1;
+
+          this.pushTrainingEvent({
+            game_event: 'score_trend',
+            side,
+            scoreWindowMs: this.scoreTrendWindowMs,
+            scoreBefore: trend.lastVisibleScore,
+            scoreAfter: currentVisibleScore,
+            scoreDelta: scoreGain,
+            expectedScoreDelta: expectedGain,
+            reward: penalty,
+            rewardReason: 'low_score_growth',
+            scoreTotal: this.getScoreSystem(side).getTotalScore(),
+            scoreCombo: this.getScoreSystem(side).getComboScore(),
+            scoreVisible: currentVisibleScore,
+            scoreTrendPenalty: penalty,
+            scoreTrendCumulativePenalty: trend.cumulativePenalty,
+          });
+        }
+
+        trend.lastVisibleScore = currentVisibleScore;
+      }
+    }
+  }
+
   private bankComboScore(side: PlayerSide) {
     const scoreSystem = this.getScoreSystem(side);
     const bankedScore = scoreSystem.bankCombo();
@@ -815,7 +936,7 @@ export class Game {
     }
   }
 
-  private spawnBoss(side: PlayerSide, aircraftType: AircraftType = 'scatter', skillTokenId?: number) {
+  private spawnBoss(side: PlayerSide, aircraftType: AircraftType = 'scatter', skillTokenId?: number, ownerSide?: PlayerSide) {
     const bossX = side === 'left'
       ? this.SCREEN_WIDTH * 0.25
       : this.SCREEN_WIDTH * 0.75;
@@ -835,8 +956,14 @@ export class Game {
         break;
     }
 
-    if (this.boss && typeof skillTokenId === 'number') {
-      this.attachSkillBoss(this.boss, skillTokenId);
+    if (this.boss) {
+      // record which player (if any) caused this boss to spawn
+      if (typeof ownerSide !== 'undefined') {
+        (this.boss as any).ownerSide = ownerSide ?? null;
+      }
+      if (typeof skillTokenId === 'number') {
+        this.attachSkillBoss(this.boss, skillTokenId);
+      }
     }
   }
   
@@ -940,6 +1067,8 @@ export class Game {
         }
       }
     }
+
+    this.updateScoreTrendSignals(deltaTime);
     
     // combo systems updated earlier in the frame; avoid double-updating here.
     
@@ -1453,8 +1582,11 @@ export class Game {
         const dx = bx - field.x;
         const dy = by - field.y;
         if (dx * dx + dy * dy <= radiusSq) {
-          bullet.active = false;
-          clearedBullets += 1;
+          // Only clear bullets that are allowed to be destroyed by fields
+          if ((bullet as any).canBeDestroyed) {
+            bullet.active = false;
+            clearedBullets += 1;
+          }
         }
       }
 
@@ -1473,7 +1605,10 @@ export class Game {
         const dy = ey - field.y;
         if (dx * dx + dy * dy <= radiusSq) {
           enemy.active = false;
-          this.registerEnemyDefeat(field.ownerSide, enemy);
+          // Use onEnemyKilled to ensure the full explosion chain runs
+          // (registerEnemyDefeat only updates score/charge but does not
+          // trigger the explosion that can transfer bullets).
+          this.onEnemyKilled(enemy, field.ownerSide);
         }
       }
     }
@@ -1635,19 +1770,28 @@ export class Game {
       if (bullet.category === 'barrage') {
         const targetPlayer = bullet.side === 'left' ? this.player1 : this.player2;
 
-        if (targetPlayer && this.isCollidingWithPlayerHitbox(bullet, targetPlayer)) {
-            const tookDamage = targetPlayer.applyDamage(bullet.damage, this);
-            bullet.active = false;
+        if (targetPlayer && ((bullet as { isBossLaser?: boolean }).isBossLaser ? this.isCollidingWithBossLaser(bullet, targetPlayer) : this.isCollidingWithPlayerHitbox(bullet, targetPlayer))) {
+            const isPersistentBeam = typeof bullet.isBeamLike === 'function' && bullet.isBeamLike();
+            const isIndestructible = bullet.canBeDestroyed === false;
+            let tookDamage = false;
+
+            if (isPersistentBeam || isIndestructible) {
+              if (!bullet.hasHit(targetPlayer)) {
+                bullet.markHit(targetPlayer);
+                tookDamage = targetPlayer.applyDamage(bullet.damage, this);
+              }
+            } else {
+              tookDamage = targetPlayer.applyDamage(bullet.damage, this);
+              bullet.active = false;
+            }
 
             // 被弹幕命中时清空该侧连击
             if (tookDamage) {
               const side = targetPlayer.getSide();
               if (side === 'left') {
                 this.interruptCombo('left');
-              } else {
-                if (this.comboSystem2) {
-                  this.interruptCombo('right');
-                }
+              } else if (this.comboSystem2) {
+                this.interruptCombo('right');
               }
             }
         }
@@ -1723,6 +1867,33 @@ export class Game {
     const dx = hitbox.x - nearestX;
     const dy = hitbox.y - nearestY;
     return dx * dx + dy * dy <= hitbox.radius * hitbox.radius;
+  }
+
+  private isCollidingWithBossLaser(
+    bullet: Bullet,
+    player: Player
+  ): boolean {
+    const laser = typeof bullet.getSegmentLaserCollisionData === 'function'
+      ? bullet.getSegmentLaserCollisionData()
+      : null;
+
+    if (!laser) {
+      return this.isCollidingWithPlayerHitbox(bullet, player);
+    }
+
+    const hitbox = player.getHitbox();
+    const nearest = this.closestPointOnSegment(
+      hitbox.x,
+      hitbox.y,
+      laser.headX,
+      laser.headY,
+      laser.tailX,
+      laser.tailY,
+    );
+    const dx = hitbox.x - nearest.x;
+    const dy = hitbox.y - nearest.y;
+    const effectiveRadius = hitbox.radius + laser.thicknessPx / 2;
+    return dx * dx + dy * dy <= effectiveRadius * effectiveRadius;
   }
 
   private isCollidingEnemyWithPlayerShape(enemy: Enemy, player: Player): boolean {
@@ -1859,17 +2030,18 @@ export class Game {
     const dx = x2 - x1;
     const dy = y2 - y1;
     const lengthSq = dx * dx + dy * dy;
+
     if (lengthSq <= 1e-9) {
       return { x: x1, y: y1 };
     }
 
     const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / lengthSq));
     return {
-      x: x1 + t * dx,
-      y: y1 + t * dy,
+      x: x1 + dx * t,
+      y: y1 + dy * t,
     };
   }
-  
+
   private onEnemyKilled(enemy: Enemy, side: PlayerSide) {
     this.registerEnemyDefeat(side, enemy);
     
@@ -1900,6 +2072,8 @@ export class Game {
       // only consider active, non-transferring barrage bullets that can be destroyed
       if (!b.active) return false;
       if (typeof (b as any).isTransferringState === 'function' && (b as any).isTransferringState()) return false;
+      // do not consider beam-like lasers for transfer (they should be cleared, not transferred)
+      if (typeof (b as any).isBeamLike === 'function' && (b as any).isBeamLike()) return false;
       const bulletCenterX = b.x + b.width / 2;
       const bulletCenterY = b.y + b.height / 2;
       const dist = Math.hypot(bulletCenterX - centerX, bulletCenterY - centerY);
@@ -1967,11 +2141,11 @@ export class Game {
     chargeSystem.addCharge(30);
   }
   
-  triggerBoss(side: PlayerSide, aircraftType: AircraftType = 'scatter', skillTokenId?: number) {
+  triggerBoss(side: PlayerSide, aircraftType: AircraftType = 'scatter', skillTokenId?: number, ownerSide?: PlayerSide) {
     if (this.boss) {
       this.removeBoss();
     }
-    this.spawnBoss(side, aircraftType, skillTokenId);
+    this.spawnBoss(side, aircraftType, skillTokenId, ownerSide);
   }
 
   removeBoss() {
@@ -2110,6 +2284,9 @@ export class Game {
   }
 
   private finalizeMatchTraining(winner: 'left' | 'right' | 'draw') {
+    const leftScore = this.getScoreShapingSnapshot('left');
+    const rightScore = this.getScoreShapingSnapshot('right');
+
     this.pushTrainingEvent({
       game_event: 'game_end',
       winner,
@@ -2118,6 +2295,20 @@ export class Game {
       right_health: this.player2?.health ?? null,
       mode: this.gameMode,
       difficulty: this.aiDifficulty,
+      left_total_score: leftScore.totalScore,
+      left_combo_score: leftScore.comboScore,
+      left_visible_score: leftScore.visibleScore,
+      left_score_trend_penalty: leftScore.scoreTrendPenalty,
+      left_score_trend_penalty_events: leftScore.scoreTrendPenaltyEvents,
+      left_final_score_reward: leftScore.finalScoreReward,
+      left_final_score_reward_total: leftScore.finalScoreRewardTotal,
+      right_total_score: rightScore.totalScore,
+      right_combo_score: rightScore.comboScore,
+      right_visible_score: rightScore.visibleScore,
+      right_score_trend_penalty: rightScore.scoreTrendPenalty,
+      right_score_trend_penalty_events: rightScore.scoreTrendPenaltyEvents,
+      right_final_score_reward: rightScore.finalScoreReward,
+      right_final_score_reward_total: rightScore.finalScoreRewardTotal,
     });
 
     if (this.gameMode === 'selfplay' && this.trainingEvents.length > 0) {
@@ -2175,17 +2366,22 @@ export class Game {
 
   getMatchSummary() {
     const summarizeSide = (side: PlayerSide) => {
-      const scoreSystem = this.getScoreSystem(side);
       const comboSystem = this.getComboSystem(side);
       const chargeSystem = this.getChargeSystem(side);
+      const score = this.getScoreShapingSnapshot(side);
 
       return {
         health: side === 'left' ? this.player1.health : this.player2?.health ?? null,
-        totalScore: scoreSystem.getTotalScore(),
-        comboScore: scoreSystem.getComboScore(),
+        totalScore: score.totalScore,
+        comboScore: score.comboScore,
+        visibleScore: score.visibleScore,
         combo: comboSystem.getCombo(),
         chargeMax: chargeSystem.getChargeMax(),
         currentCharge: chargeSystem.getCurrentCharge(),
+        scoreTrendPenalty: score.scoreTrendPenalty,
+        scoreTrendPenaltyEvents: score.scoreTrendPenaltyEvents,
+        finalScoreReward: score.finalScoreReward,
+        finalScoreRewardTotal: score.finalScoreRewardTotal,
       };
     };
 

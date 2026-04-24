@@ -3,7 +3,8 @@ import { AircraftProfile, SkillContext } from './types';
 
 const triggerLaserBoss = (side: 'left' | 'right', intensity: 2 | 3 | 4, game: SkillContext['game']) => {
   const targetSide = side === 'left' ? 'right' : 'left';
-  game.triggerBoss(targetSide, 'laser');
+  // pass the caster side so boss lasers can be colored to the caster
+  game.triggerBoss(targetSide, 'laser', undefined, side);
   const boss = game.getBoss();
   const skillBoss = boss as unknown as { setSkillIntensity?: (level: 2 | 3 | 4) => void } | null;
   if (skillBoss?.setSkillIntensity) {
@@ -172,6 +173,7 @@ export const laserAircraftProfile: AircraftProfile = {
               damage,
               targetSide
             );
+            beam.ownerSide = player.getSide();
             const followTarget = { x: chosenX, y: 0, width: 0, height: 0 };
             beam.startLaser(followTarget, activeDuration, resetInterval, thickness, { origin: 'bottom', originY: viewport.y + viewport.height, followX: true });
             game.addSkillBullet(beam, skillTokenId);
@@ -196,6 +198,7 @@ export const laserAircraftProfile: AircraftProfile = {
               damage,
               targetSide
             );
+            beam.ownerSide = player.getSide();
             const followTarget = { x: chosenX, y: 0, width: 0, height: 0 };
             beam.startLaser(followTarget, activeDuration, resetInterval, thickness, { origin: 'bottom', originY: viewport.y + viewport.height, followX: true });
             game.addBullet(beam);
@@ -205,7 +208,7 @@ export const laserAircraftProfile: AircraftProfile = {
       }, spawnDelay);
     }
 
-    return true;
+    return false;
   },
   handleLevel3Skill({ player, game, skillTokenId }) {
     // 生成 4 个目标，每个间隔 0.25s：从自机发射光球到目标底部（先快后慢），光球到达后逐渐显示 1s 预警，随后激活 1.5s 激光
@@ -302,6 +305,7 @@ export const laserAircraftProfile: AircraftProfile = {
               damage,
               targetSide
             );
+            beam.ownerSide = player.getSide();
             const followTarget = { x: chosenX, y: 0, width: 0, height: 0 };
             beam.startLaser(followTarget, activeDuration, resetInterval, thickness, { origin: 'bottom', originY: viewport.y + viewport.height, followX: true });
             game.addSkillBullet(beam, skillTokenId);
@@ -326,6 +330,7 @@ export const laserAircraftProfile: AircraftProfile = {
               damage,
               targetSide
             );
+            beam.ownerSide = player.getSide();
             const followTarget = { x: chosenX, y: 0, width: 0, height: 0 };
             beam.startLaser(followTarget, activeDuration, resetInterval, thickness, { origin: 'bottom', originY: viewport.y + viewport.height, followX: true });
             game.addBullet(beam);
@@ -335,7 +340,7 @@ export const laserAircraftProfile: AircraftProfile = {
       }, spawnDelay);
     }
 
-    return true;
+    return false;
   },
   handleLevel4Skill({ player, game, skillTokenId }) {
     // 触发扩散力场（保持与其他机体一致）
@@ -346,6 +351,7 @@ export const laserAircraftProfile: AircraftProfile = {
     }
 
     triggerLaserBoss(player.getSide(), 4, game);
-    return true;
+    // Allow base/advanced attack to proceed after boss trigger
+    return false;
   },
 };

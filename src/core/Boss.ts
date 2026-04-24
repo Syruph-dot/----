@@ -11,6 +11,7 @@ export abstract class Boss {
   active = true;
   
   side: PlayerSide;
+  ownerSide: PlayerSide | null = null;
   protected speed = 1;
   protected moveDirection = 1;
   private skillLifecycleId: number | null = null;
@@ -72,8 +73,9 @@ export abstract class Boss {
   render(ctx: CanvasRenderingContext2D) {
     const cx = this.x + this.width / 2;
     const cy = this.y + this.height / 2;
-    const accent = this.side === 'left' ? '#59f0ff' : '#ff6f8e';
-    const aura = this.side === 'left' ? 'rgba(89, 240, 255, 0.22)' : 'rgba(255, 111, 142, 0.22)';
+    // Boss color intentionally inverted: left side bosses display red, right side blue
+    const accent = this.side === 'left' ? '#ff6f8e' : '#59f0ff';
+    const aura = this.side === 'left' ? 'rgba(255, 111, 142, 0.22)' : 'rgba(89, 240, 255, 0.22)';
 
     ctx.save();
     ctx.translate(cx, cy);

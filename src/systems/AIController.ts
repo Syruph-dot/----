@@ -35,6 +35,11 @@ interface AIProfile {
   attackWeight: number;
   moveWeight: number;
   edgeWeight: number;
+  centerBiasWeight: number;
+  edgeDwellWeight: number;
+  bulletApproachWeight: number;
+  beamThreatWeight: number;
+  warningThreatWeight: number;
   randomJitter: number;
   deadZone: number;
   tapHoldMs: number;
@@ -55,6 +60,8 @@ interface AIProfile {
   enemyBodyThreatWeight: number;
   enemyBodyLookAheadFrames: number;
   enemyBodySpeedEstimate: number;
+  idleProbeFireIntervalMs: number;
+  minNonBombSkillIntervalMs: number;
 }
 
 interface MovementPlan {
@@ -77,7 +84,7 @@ interface AIContext {
   maxUsefulLevel: number;
 }
 
-type FireDecision = 'none';
+type FireDecision = 'keepGun' | 'stopGun';
 type FireBlockedReason = 'none' | 'skill' | 'charging' | 'postActionCooldown' | 'noTarget';
 
 export class AIController {
@@ -88,6 +95,7 @@ export class AIController {
   private readonly skillScheduler = new SkillScheduler();
 
   private decisionAccumulator = 0;
+  private edgeDwellMs = 0;
   private charging = false;
   private chargeHoldMs = 0;
   private chargingTargetLevel = 0;
@@ -95,12 +103,14 @@ export class AIController {
   public lastSkillMask: boolean[] = [];
   public lastSkillRequested: SkillId = 'none';
   public lastSkillExecuted: SkillId = 'none';
-  public lastFireDecision: FireDecision = 'none';
+  public lastFireDecision: FireDecision = 'stopGun';
   public lastFireBlockedReason: FireBlockedReason = 'none';
   public lastFireExecuted: 'none' | 'shoot' = 'none';
   private readonly policyProvider: PolicyDecisionProvider | null;
   private latestPolicyDecision: PolicyDecision | null = null;
   private policyDecisionPending = false;
+  private lastNormalFireAtMs = 0;
+  private lastNonBombSkillAtMs = 0;
 
   // Dodge state triggered by immediate bullet spawn notifications
   private dodgeTarget: Vector2 | null = null;
@@ -108,7 +118,7 @@ export class AIController {
 
   // Backward-compatible UI hook used by Game HUD.
   getChargeIntent(): { isCharging: boolean; progress: number; skill: string } {
-    const chargingSkill = this.chargingTargetLevel >= 1;
+    const chargingSkill = this.chargingTargetLevel >= 1 && this.player.isChargingNow();
     const requiredHold = chargingSkill
       ? this.profile.releaseWindows[Math.max(1, Math.min(4, this.chargingTargetLevel))]
       : 1;
@@ -132,6 +142,14 @@ export class AIController {
 
   update(deltaTime: number) {
     this.decisionAccumulator += deltaTime;
+    this.updateEdgeDwell(deltaTime);
+
+    if (this.charging && !this.player.isChargingNow()) {
+      const currentCharge = this.player.getChargeSystem().getCurrentCharge();
+      if (this.chargeHoldMs > 0 || currentCharge > 0) {
+        this.resetChargeChain();
+      }
+    }
 
     if (this.postActionCooldownMs > 0) {
       this.postActionCooldownMs = Math.max(0, this.postActionCooldownMs - deltaTime);
@@ -168,9 +186,10 @@ export class AIController {
 
     let skillRequested: SkillId = 'none';
     let skillExecuted: SkillId = 'none';
-    let fireState: { decision: FireDecision; blockedReason: FireBlockedReason } = { decision: 'none', blockedReason: 'none' };
+    let fireState: { decision: FireDecision; blockedReason: FireBlockedReason } = { decision: 'stopGun', blockedReason: 'none' };
     let fireExecuted: 'none' | 'shoot' = 'none';
     const fireTargetAvailable = this.hasShootableTarget(context);
+    const desiredFireFromPolicy = policyDecision ? this.policyFireToDecision(policyDecision.fire) : 'keepGun';
 
     if (policyDecision) {
       this.applyPolicyMovement(policyDecision.move);
@@ -179,16 +198,22 @@ export class AIController {
 
       this.lastSkillRequested = skillRequested;
       this.lastSkillExecuted = skillExecuted;
+      if (skillExecuted === 'skill1' || skillExecuted === 'skill2' || skillExecuted === 'skill3' || skillExecuted === 'skill4') {
+        this.lastNonBombSkillAtMs = Date.now();
+      }
       if (skillExecuted !== 'none') {
         this.postActionCooldownMs = Math.max(this.postActionCooldownMs, this.profile.postActionCooldownMs);
       }
 
-      fireState = this.selectPolicyFireState(context, skillRequested, skillExecuted);
+      fireState = this.selectFireState(context, skillExecuted, desiredFireFromPolicy);
       this.lastFireDecision = fireState.decision;
       this.lastFireBlockedReason = fireState.blockedReason;
 
-      if (fireState.decision === 'none' && fireState.blockedReason === 'none') {
+      if (fireState.decision === 'keepGun' && fireState.blockedReason === 'none') {
         fireExecuted = this.skillScheduler.triggerSkill('shoot', this.player, this.game) as 'none' | 'shoot';
+        if (fireExecuted === 'shoot') {
+          this.lastNormalFireAtMs = Date.now();
+        }
       }
       this.lastFireExecuted = fireExecuted;
     } else {
@@ -197,16 +222,22 @@ export class AIController {
 
       this.lastSkillRequested = skillRequested;
       this.lastSkillExecuted = skillExecuted;
+      if (skillExecuted === 'skill1' || skillExecuted === 'skill2' || skillExecuted === 'skill3' || skillExecuted === 'skill4') {
+        this.lastNonBombSkillAtMs = Date.now();
+      }
       if (skillExecuted !== 'none') {
         this.postActionCooldownMs = Math.max(this.postActionCooldownMs, this.profile.postActionCooldownMs);
       }
 
-      fireState = this.selectFireState(context, skillRequested, skillExecuted);
+      fireState = this.selectFireState(context, skillExecuted, 'keepGun');
       this.lastFireDecision = fireState.decision;
       this.lastFireBlockedReason = fireState.blockedReason;
 
-      if (fireState.decision === 'none' && fireState.blockedReason === 'none') {
+      if (fireState.decision === 'keepGun' && fireState.blockedReason === 'none') {
         fireExecuted = this.skillScheduler.triggerSkill('shoot', this.player, this.game) as 'none' | 'shoot';
+        if (fireExecuted === 'shoot') {
+          this.lastNormalFireAtMs = Date.now();
+        }
       }
       this.lastFireExecuted = fireExecuted;
       this.applyMovementPlan(movementPlan);
@@ -229,6 +260,7 @@ export class AIController {
         skillRequested,
         skillExecuted,
         fireTargetAvailable,
+        fireDecision: fireState.decision,
         fireBlockedReason: fireState.blockedReason,
         fireExecuted,
         observation,
@@ -443,28 +475,8 @@ export class AIController {
     this.player.movingDown = movementFlags.down;
   }
 
-  private selectPolicyFireState(
-    context: AIContext,
-    skillRequested: SkillId,
-    skillExecuted: SkillId,
-  ): { decision: FireDecision; blockedReason: FireBlockedReason } {
-    if (this.charging) {
-      return { decision: 'none', blockedReason: 'charging' };
-    }
-
-    if (this.postActionCooldownMs > 0) {
-      return { decision: 'none', blockedReason: 'postActionCooldown' };
-    }
-
-    if (skillRequested !== 'none' || skillExecuted !== 'none') {
-      return { decision: 'none', blockedReason: 'skill' };
-    }
-
-    if (!this.hasShootableTarget(context)) {
-      return { decision: 'none', blockedReason: 'noTarget' };
-    }
-
-    return { decision: 'none', blockedReason: 'none' };
+  private policyFireToDecision(fire: PolicyDecision['fire']): FireDecision {
+    return fire === 'stopGun' ? 'stopGun' : 'keepGun';
   }
 
   private skillLabelToId(skill: PolicyDecision['skill']): SkillId {
@@ -481,33 +493,96 @@ export class AIController {
     }
   }
 
+  private normalizeChargeSkillRequest(skillRequested: SkillId): SkillId {
+    const avail = this.player.getAvailableSkills();
+
+    switch (skillRequested) {
+      case 'skill4':
+        if (avail.skill4) return 'skill4';
+        if (this.charging && this.chargingTargetLevel >= 1) return `skill${this.chargingTargetLevel}` as SkillId;
+        if (avail.skill3) return 'skill3';
+        if (avail.skill2) return 'skill2';
+        if (avail.skill1) return 'skill1';
+        return 'none';
+      case 'skill3':
+        if (avail.skill3) return 'skill3';
+        if (this.charging && this.chargingTargetLevel >= 1) return `skill${this.chargingTargetLevel}` as SkillId;
+        if (avail.skill2) return 'skill2';
+        if (avail.skill1) return 'skill1';
+        return 'none';
+      case 'skill2':
+        if (avail.skill2) return 'skill2';
+        if (this.charging && this.chargingTargetLevel >= 1) return `skill${this.chargingTargetLevel}` as SkillId;
+        if (avail.skill1) return 'skill1';
+        return 'none';
+      case 'skill1':
+        if (avail.skill1) return 'skill1';
+        if (this.charging && this.chargingTargetLevel >= 1) return `skill${this.chargingTargetLevel}` as SkillId;
+        return 'none';
+      default:
+        return skillRequested;
+    }
+  }
+
   private selectFireState(
     context: AIContext,
-    skillRequested: SkillId,
     skillExecuted: SkillId,
+    desiredFire: FireDecision,
   ): { decision: FireDecision; blockedReason: FireBlockedReason } {
+    if (desiredFire === 'stopGun') {
+      return { decision: 'stopGun', blockedReason: 'none' };
+    }
+
     if (this.charging) {
-      return { decision: 'none', blockedReason: 'charging' };
+      return { decision: 'stopGun', blockedReason: 'charging' };
     }
 
     if (this.postActionCooldownMs > 0) {
-      return { decision: 'none', blockedReason: 'postActionCooldown' };
+      return { decision: 'stopGun', blockedReason: 'postActionCooldown' };
     }
 
-    if (skillRequested !== 'none' || skillExecuted !== 'none') {
-      return { decision: 'none', blockedReason: 'skill' };
+    // Do not block normal attack just because a skill was requested.
+    // Only the skill that actually executes this tick should suppress fire.
+    if (skillExecuted !== 'none') {
+      return { decision: 'stopGun', blockedReason: 'skill' };
     }
 
-    if (!this.hasShootableTarget(context)) {
-      return { decision: 'none', blockedReason: 'noTarget' };
+    if (this.hasShootableTarget(context)) {
+      return { decision: 'keepGun', blockedReason: 'none' };
     }
 
-    return { decision: 'none', blockedReason: 'none' };
+    const now = Date.now();
+    if (now - this.lastNormalFireAtMs >= this.profile.idleProbeFireIntervalMs) {
+      return { decision: 'keepGun', blockedReason: 'none' };
+    }
+
+    return { decision: 'stopGun', blockedReason: 'noTarget' };
   }
 
   private hasShootableTarget(context: AIContext): boolean {
     const bossOnMySide = Boolean(context.boss && context.boss.side === this.side && context.boss.canTakeDamage());
     return context.enemies.length > 0 || bossOnMySide;
+  }
+
+  private hasCloseFrontEnemy(context: AIContext): boolean {
+    try {
+      const center = context.currentCenter;
+      const laneWidth = this.profile.enemyLaneWidth || 98;
+      const horizThreshold = Math.max(this.player.width, laneWidth * 0.6);
+      const vertThreshold = 400;
+      for (const e of context.enemies) {
+        const enemyCenterX = e.x + (e.width || 0) / 2;
+        const enemyCenterY = e.y + (e.height || 0) / 2;
+        const dx = Math.abs(enemyCenterX - center.x);
+        const dy = center.y - enemyCenterY; // positive when enemy is above the player (in front)
+        if (dy > 0 && dy <= vertThreshold && dx <= horizThreshold) {
+          return true;
+        }
+      }
+    } catch (e) {
+      // swallow
+    }
+    return false;
   }
 
   // Called by Game when a new bullet is spawned. Allows the AI to react
@@ -605,6 +680,11 @@ export class AIController {
       const denseBullets = context.nearbyBulletCount >= this.profile.bombNearbyThreshold;
       const highThreat = panicThreat >= (this.profile.bombThreatThreshold * 1.15);
       const extremeThreat = panicThreat >= (this.profile.bombThreatThreshold * 1.4);
+      const cornerTrap = this.edgeDwellMs >= 900;
+
+      if (cornerTrap && denseBullets && panicThreat >= (this.profile.bombThreatThreshold * 0.9)) {
+        return 'bomb';
+      }
 
       if (bossOnMySide && (criticalHealth || (extremeThreat && denseBullets))) {
         return 'bomb';
@@ -625,6 +705,13 @@ export class AIController {
     const maxUsefulLevel = context.maxUsefulLevel;
     const desiredLevel = this.getDesiredSkillLevel(context, plan, maxUsefulLevel);
 
+    // If there's a close enemy in front, prefer normal attack over charge skills (1..3).
+    // Allow top-level releases (level 4) and bombs as usual.
+    if (this.hasCloseFrontEnemy(context)) {
+      if (desiredLevel >= 4 && avail.skill4) return 'skill4';
+      return 'none';
+    }
+
     if (desiredLevel >= 4 && avail.skill4) return 'skill4';
     if (desiredLevel >= 3 && avail.skill3) return 'skill3';
     if (desiredLevel >= 2 && avail.skill2) return 'skill2';
@@ -641,6 +728,17 @@ export class AIController {
     if (skillRequested === 'bomb') {
       this.resetChargeChain();
       return this.skillScheduler.triggerSkill('bomb', this.player, this.game);
+    }
+
+    skillRequested = this.normalizeChargeSkillRequest(skillRequested);
+
+    if (
+      skillRequested !== 'none'
+      && !this.charging
+      && this.lastNonBombSkillAtMs > 0
+      && (Date.now() - this.lastNonBombSkillAtMs) < this.profile.minNonBombSkillIntervalMs
+    ) {
+      return 'none';
     }
 
     if (skillRequested === 'skill1') {
@@ -730,6 +828,9 @@ export class AIController {
     const screenHeight = this.game.getScreenHeight();
     const sideBounds = this.getSideBounds();
     const currentCenter = context.currentCenter;
+    const laneCenterX = (sideBounds.minX + sideBounds.maxX) / 2;
+    const halfLaneWidth = Math.max(1, (sideBounds.maxX - sideBounds.minX) / 2);
+    const calmFactor = this.clamp(1 - (context.currentThreat / Math.max(0.001, this.profile.panicThreatThreshold)), 0, 1);
 
     const targetY = this.clamp(
       screenHeight * (0.66 + Math.min(context.currentThreat, 5) * 0.03),
@@ -750,11 +851,15 @@ export class AIController {
         const distanceCost = this.distance(currentCenter, candidate);
         const edgePenalty = this.computeEdgePenalty(candidateX, sideBounds);
         const yPenalty = Math.abs(candidateY - targetY) / 48;
+        const centerDistance = Math.abs(candidateX - laneCenterX) / halfLaneWidth;
+        const edgeDwellScale = 1 + Math.min(2, this.edgeDwellMs / 1000) * this.profile.edgeDwellWeight;
+        const centerBias = centerDistance * this.profile.centerBiasWeight * (0.35 + calmFactor) * (1 + Math.min(1.5, this.edgeDwellMs / 1200));
 
         const score = (threat * this.profile.threatWeight)
           - (opportunity * this.profile.attackWeight)
           + (distanceCost * this.profile.moveWeight)
-          + (edgePenalty * this.profile.edgeWeight)
+          + (edgePenalty * this.profile.edgeWeight * edgeDwellScale)
+          + centerBias
           + (yPenalty * 0.25)
           + (Math.random() * this.profile.randomJitter);
 
@@ -960,6 +1065,16 @@ export class AIController {
 
   private computeBulletThreat(bullet: Bullet, hitbox: HitboxCircle): number {
     const lookAheadFrames = this.profile.lookAheadFrames;
+    const bulletCenter = this.getBulletCenter(bullet);
+    const toHitX = hitbox.x - bulletCenter.x;
+    const toHitY = hitbox.y - bulletCenter.y;
+    const distanceToHit = Math.max(1, Math.hypot(toHitX, toHitY));
+    const bulletSpeed = Math.max(1, Math.hypot(bullet.vx, bullet.vy));
+    const approachAlignment = Math.max(0, (toHitX * bullet.vx + toHitY * bullet.vy) / (distanceToHit * bulletSpeed));
+    const motionMultiplier = 1 + (approachAlignment * this.profile.bulletApproachWeight);
+    const specialMultiplier = (typeof bullet.isBeamLike === 'function' && bullet.isBeamLike() ? this.profile.beamThreatWeight : 1)
+      * (bullet.isWarning ? this.profile.warningThreatWeight : 1);
+    const threatMultiplier = motionMultiplier * specialMultiplier;
     let softThreat = 0;
     const projector = (bullet as any).getProjectedThreatRect;
 
@@ -974,12 +1089,12 @@ export class AIController {
           };
 
       if (this.getRectDistanceToHitbox(bulletRect, hitbox) <= 0) {
-        return 1 + ((lookAheadFrames - frame + 1) / lookAheadFrames);
+        return (1 + ((lookAheadFrames - frame + 1) / lookAheadFrames)) * threatMultiplier;
       }
 
       const distance = this.getRectDistanceToHitbox(bulletRect, hitbox);
       if (distance < 50) {
-        softThreat = Math.max(softThreat, (50 - distance) / 50 * 0.45);
+        softThreat = Math.max(softThreat, ((50 - distance) / 50) * 0.45 * threatMultiplier);
       }
     }
 
@@ -1061,6 +1176,11 @@ export class AIController {
           attackWeight: 0.95,
           moveWeight: 0.011,
           edgeWeight: 0.32,
+          centerBiasWeight: 0.16,
+          edgeDwellWeight: 0.8,
+          bulletApproachWeight: 0.55,
+          beamThreatWeight: 1.45,
+          warningThreatWeight: 1.08,
           randomJitter: 0.3,
           deadZone: 12,
           tapHoldMs: 150,
@@ -1081,6 +1201,8 @@ export class AIController {
           enemyBodyThreatWeight: 0.75,
           enemyBodyLookAheadFrames: 20,
           enemyBodySpeedEstimate: 3.75,
+          idleProbeFireIntervalMs: 360,
+          minNonBombSkillIntervalMs: 1050,
         };
       case 'hard':
         return {
@@ -1092,6 +1214,11 @@ export class AIController {
           attackWeight: 2.05,
           moveWeight: 0.006,
           edgeWeight: 0.18,
+          centerBiasWeight: 0.14,
+          edgeDwellWeight: 1.05,
+          bulletApproachWeight: 0.8,
+          beamThreatWeight: 1.8,
+          warningThreatWeight: 1.1,
           randomJitter: 0.03,
           deadZone: 4,
           tapHoldMs: 80,
@@ -1112,6 +1239,8 @@ export class AIController {
           enemyBodyThreatWeight: 1.3,
           enemyBodyLookAheadFrames: 34,
           enemyBodySpeedEstimate: 3.75,
+          idleProbeFireIntervalMs: 240,
+          minNonBombSkillIntervalMs: 680,
         };
       case 'normal':
       default:
@@ -1124,6 +1253,11 @@ export class AIController {
           attackWeight: 1.45,
           moveWeight: 0.01,
           edgeWeight: 0.28,
+          centerBiasWeight: 0.2,
+          edgeDwellWeight: 0.95,
+          bulletApproachWeight: 0.65,
+          beamThreatWeight: 1.6,
+          warningThreatWeight: 1.05,
           randomJitter: 0.15,
           deadZone: 9,
           tapHoldMs: 120,
@@ -1144,6 +1278,8 @@ export class AIController {
           enemyBodyThreatWeight: 1,
           enemyBodyLookAheadFrames: 26,
           enemyBodySpeedEstimate: 3.75,
+          idleProbeFireIntervalMs: 300,
+          minNonBombSkillIntervalMs: 850,
         };
     }
   }
@@ -1231,6 +1367,23 @@ export class AIController {
     }
 
     return (edgeBuffer - nearEdge) / edgeBuffer;
+  }
+
+  private updateEdgeDwell(deltaTime: number) {
+    const bounds = this.getSideBounds();
+    const center = this.getPlayerCenter();
+    const leftGap = center.x - bounds.minX;
+    const rightGap = bounds.maxX - center.x;
+    const nearestEdgeGap = Math.min(leftGap, rightGap);
+    const edgeBuffer = Math.max(28, (bounds.maxX - bounds.minX) * 0.14);
+
+    if (nearestEdgeGap < edgeBuffer) {
+      const edgeProximity = 1 - this.clamp(nearestEdgeGap / edgeBuffer, 0, 1);
+      this.edgeDwellMs = Math.min(5000, this.edgeDwellMs + deltaTime * (0.5 + edgeProximity));
+      return;
+    }
+
+    this.edgeDwellMs = Math.max(0, this.edgeDwellMs - deltaTime * 0.9);
   }
 
   private rectsOverlap(a: Rect, b: Rect): boolean {

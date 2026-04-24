@@ -19,6 +19,7 @@ export class Bullet {
   canBeDestroyed: boolean;
   damage: number;
   side: PlayerSide;  // 弹幕需要side来标识属于哪方
+  ownerSide: PlayerSide | null = null;
 
   private _moveDirX = 0;
   private _moveDirY = 1;
@@ -101,6 +102,7 @@ export class Bullet {
   private segmentPostBounceDirX = 0;
   private segmentPostBounceDirY = 1;
   private skillLifecycleId: number | null = null;
+  isBossLaser = false;
 
   constructor(x: number, y: number, vx: number, vy: number,
               category: BulletCategory, bulletType: BulletType,
@@ -346,6 +348,20 @@ export class Bullet {
     return this.isLaser || this.isSegmentLaser;
   }
 
+  getSegmentLaserCollisionData(): { headX: number; headY: number; tailX: number; tailY: number; thicknessPx: number } | null {
+    if (!this.isSegmentLaser) {
+      return null;
+    }
+
+    return {
+      headX: this.segmentHeadX,
+      headY: this.segmentHeadY,
+      tailX: this.segmentTailX,
+      tailY: this.segmentTailY,
+      thicknessPx: this.segmentThicknessPx,
+    };
+  }
+
   configureOutOfBoundsGracePeriod(graceMs: number) {
     this.outOfBoundsGracePeriod = Math.max(0, graceMs);
     this.outOfBoundsSince = null;
@@ -521,6 +537,11 @@ export class Bullet {
     this.segmentHeadY = this.segmentBouncePointY;
     this.segmentTailX = this.segmentOriginX + this.segmentPreBounceDirX * this.segmentTailDistanceAtBouncePx;
     this.segmentTailY = this.segmentOriginY + this.segmentPreBounceDirY * this.segmentTailDistanceAtBouncePx;
+    // 反弹后仍需保留一段额外寿命，避免激光在可见范围内因初始总寿命到点而突然消失。
+    this.segmentLifetimeMs = Math.max(
+      this.segmentLifetimeMs,
+      this.segmentElapsedMs + (this.segmentTailDelayMs * 2) + 300,
+    );
 
     this.updateSegmentBoundsRect();
     return true;
@@ -739,10 +760,15 @@ export class Bullet {
     }
 
     if (this.isSegmentLaser) {
-      ctx.strokeStyle = 'rgba(255, 138, 110, 0.92)';
+      const colorSide: PlayerSide = this.ownerSide ?? (this.category === 'player1' ? 'left' : this.category === 'player2' ? 'right' : this.side);
+      const strokeColor = colorSide === 'left' ? 'rgba(89, 240, 255, 0.92)' : 'rgba(255, 111, 142, 0.92)';
+      const shadowColor = colorSide === 'left' ? 'rgba(89, 240, 255, 0.45)' : 'rgba(255, 111, 142, 0.45)';
+      const headFill = colorSide === 'left' ? 'rgba(89, 240, 255, 0.95)' : 'rgba(255, 111, 142, 0.95)';
+
+      ctx.strokeStyle = strokeColor;
       ctx.lineWidth = this.segmentThicknessPx;
       ctx.lineCap = 'round';
-      ctx.shadowColor = 'rgba(255, 138, 110, 0.45)';
+      ctx.shadowColor = shadowColor;
       ctx.shadowBlur = 10;
 
       // 如果存在 segmentBounds，则在绘制前裁剪到该矩形，防止越过半屏边界绘制
@@ -762,7 +788,7 @@ export class Bullet {
       ctx.lineTo(this.segmentHeadX, this.segmentHeadY);
       ctx.stroke();
 
-      ctx.fillStyle = 'rgba(255, 245, 220, 0.95)';
+      ctx.fillStyle = headFill;
       ctx.beginPath();
       ctx.arc(this.segmentHeadX, this.segmentHeadY, Math.max(2, this.segmentThicknessPx * 0.33), 0, Math.PI * 2);
       ctx.fill();
@@ -784,10 +810,12 @@ export class Bullet {
       }
       ctx.globalAlpha = alpha;
 
+      const colorSide: PlayerSide = this.ownerSide ?? (this.category === 'player1' ? 'left' : this.category === 'player2' ? 'right' : this.side);
+      const midColor = colorSide === 'left' ? 'rgba(89, 240, 255, 0.88)' : 'rgba(255, 111, 142, 0.88)';
       const gradient = ctx.createLinearGradient(this.x, this.y, this.x + this.width, this.y);
-      gradient.addColorStop(0, 'rgba(255, 209, 102, 0.08)');
-      gradient.addColorStop(0.5, 'rgba(255, 111, 142, 0.88)');
-      gradient.addColorStop(1, 'rgba(255, 255, 255, 0.08)');
+      gradient.addColorStop(0, 'rgba(255, 255, 255, 0.04)');
+      gradient.addColorStop(0.5, midColor);
+      gradient.addColorStop(1, 'rgba(255, 255, 255, 0.04)');
       ctx.fillStyle = 'rgba(255, 255, 255, 0.04)';
       ctx.fillRect(this.x - this.width * 1.4, this.y, this.width * 3.8, this.height);
       ctx.fillStyle = gradient;

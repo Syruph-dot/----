@@ -11,7 +11,8 @@
     "headless": "tsx scripts/headless-runner.ts",
     "evolve": "tsx scripts/evolution-batch.ts",
     "policy:smoke": "tsx scripts/policy-smoke.ts",
-    "policy:native-smoke": "tsx scripts/policy-native-smoke.ts"
+    "policy:native-smoke": "tsx scripts/policy-native-smoke.ts",
+    "trainer:start": "node tools/trainer-server.js"
   },
   "keywords": [
     "game",
