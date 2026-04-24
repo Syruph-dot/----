@@ -1,7 +1,9 @@
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { Game } from '../src/core/Game';
 import { createHeadlessRuntimeAdapter } from '../src/runtime/headlessRuntime';
+import { JsonPolicyAdapter } from '../src/systems/policy/jsonPolicy';
+import type { BCPolicySpec } from '../src/systems/policy/types';
 import type { AircraftType, Difficulty, GameMode } from '../src/entities/types';
 
 type HeadlessRunOptions = {
@@ -15,6 +17,8 @@ type HeadlessRunOptions = {
   player1Aircraft: AircraftType;
   player2Aircraft: AircraftType;
   seed: string;
+  policyLeft: string | null;
+  policyRight: string | null;
 };
 
 function getFlagValue(args: string[], flag: string, defaultValue: string) {
@@ -42,6 +46,8 @@ function parseOptions(argv: string[]): HeadlessRunOptions {
   const player1Aircraft = (getFlagValue(argv, '--p1', 'scatter') as AircraftType);
   const player2Aircraft = (getFlagValue(argv, '--p2', 'scatter') as AircraftType);
   const seed = getFlagValue(argv, '--seed', `${Date.now()}`);
+  const policyLeftRaw = getFlagValue(argv, '--policy-left', '');
+  const policyRightRaw = getFlagValue(argv, '--policy-right', '');
 
   return {
     episodes,
@@ -54,7 +60,21 @@ function parseOptions(argv: string[]): HeadlessRunOptions {
     player1Aircraft,
     player2Aircraft,
     seed,
+    policyLeft: policyLeftRaw || null,
+    policyRight: policyRightRaw || null,
   };
+}
+
+function loadJsonPolicy(policyPath: string): JsonPolicyAdapter | null {
+  try {
+    const absPath = resolve(policyPath);
+    const raw = readFileSync(absPath, 'utf8');
+    const spec = JSON.parse(raw) as BCPolicySpec;
+    return new JsonPolicyAdapter(spec);
+  } catch (error) {
+    console.error(`[headless-runner] Failed to load policy from "${policyPath}":`, error);
+    return null;
+  }
 }
 
 function printUsage() {
@@ -62,16 +82,18 @@ function printUsage() {
     'Usage: pnpm run headless -- [options]',
     '',
     'Options:',
-    '  --episodes <n>       Number of episodes to run (default: 1)',
-    '  --max-frames <n>     Maximum frames per episode (default: 6000)',
-    '  --output-dir <path>  Where to write training files (default: training-output)',
-    '  --format <jsonl|csv> Export format (default: jsonl)',
-    '  --split <none|rare-full>  Whether to emit a rare-only file too (default: rare-full)',
+    '  --episodes <n>           Number of episodes to run (default: 1)',
+    '  --max-frames <n>         Maximum frames per episode (default: 6000)',
+    '  --output-dir <path>      Where to write training files (default: training-output)',
+    '  --format <jsonl|csv>     Export format (default: jsonl)',
+    '  --split <none|rare-full> Whether to emit a rare-only file too (default: rare-full)',
     '  --mode <single|dual|selfplay>  Game mode (default: selfplay)',
     '  --difficulty <easy|normal|hard> AI difficulty (default: normal)',
     '  --p1 <scatter|laser|tracking>  Left aircraft (default: scatter)',
     '  --p2 <scatter|laser|tracking>  Right aircraft (default: scatter)',
-    '  --seed <value>       Base seed string (default: current timestamp)',
+    '  --seed <value>           Base seed string (default: current timestamp)',
+    '  --policy-left <path>     JSON policy file to use for the left player (optional)',
+    '  --policy-right <path>    JSON policy file to use for the right player (optional)',
   ].join('\n'));
 }
 
@@ -84,6 +106,21 @@ async function main() {
 
   const options = parseOptions(argv);
   mkdirSync(options.outputDir, { recursive: true });
+
+  const policyLeft = options.policyLeft ? loadJsonPolicy(options.policyLeft) : null;
+  const policyRight = options.policyRight ? loadJsonPolicy(options.policyRight) : null;
+
+  if (options.policyLeft && !policyLeft) {
+    console.error(`[headless-runner] Could not load left policy from "${options.policyLeft}". Exiting.`);
+    process.exitCode = 1;
+    return;
+  }
+
+  if (options.policyRight && !policyRight) {
+    console.error(`[headless-runner] Could not load right policy from "${options.policyRight}". Exiting.`);
+    process.exitCode = 1;
+    return;
+  }
 
   const fixedDeltaTime = 1000 / 60;
   const summary: Array<{ episode: number; frames: number; gameOver: boolean; winner: string; files: string[] }> = [];
@@ -103,6 +140,10 @@ async function main() {
         left: `headless-left-${episodeIndex + 1}`,
         right: `headless-right-${episodeIndex + 1}`,
       },
+      agentPolicies: {
+        left: policyLeft ?? null,
+        right: policyRight ?? null,
+      },
       trainingConfig: {
         source: 'headless-runner',
         episodeIndex: episodeIndex + 1,
@@ -111,6 +152,8 @@ async function main() {
         outputDir: options.outputDir,
         format: options.format,
         split: options.split,
+        policyLeft: options.policyLeft ?? null,
+        policyRight: options.policyRight ?? null,
       },
     });
 

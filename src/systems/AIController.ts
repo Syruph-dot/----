@@ -87,6 +87,73 @@ interface AIContext {
 type FireDecision = 'keepGun' | 'stopGun';
 type FireBlockedReason = 'none' | 'skill' | 'charging' | 'postActionCooldown' | 'noTarget';
 
+// ---------------------------------------------------------------------------
+// Match phase state machine — inspired by the 東方夢時空 (PoDD) design:
+//   - opening:  aggressive offense, bombs held in reserve
+//   - midgame:  balanced survival + scoring (standard profile)
+//   - endgame:  conservative resource management, controlled burst
+//   - survival: emergency defense — use all resources to stay alive
+// Phase transitions are driven by elapsed match time AND live health ratios,
+// mirroring how PoDD adjusts CPU behaviour per stage/difficulty/health band.
+// ---------------------------------------------------------------------------
+type MatchPhase = 'opening' | 'midgame' | 'endgame' | 'survival';
+
+// Multipliers applied on top of the base difficulty profile each phase.
+// Values > 1 amplify the underlying parameter; < 1 dampen it.
+interface PhaseAdjustment {
+  attackWeightScale: number;
+  threatWeightScale: number;
+  bombThreatScale: number;       // scales bombThreatThreshold (lower = bomb sooner)
+  bombNearbyScale: number;       // scales bombNearbyThreshold (lower = bomb on fewer bullets)
+  panicThreatScale: number;      // scales panicThreatThreshold
+  randomJitterScale: number;
+  opponentLowHealthBonusScale: number;
+}
+
+const PHASE_ADJUSTMENTS: Record<MatchPhase, PhaseAdjustment> = {
+  opening: {
+    attackWeightScale: 1.25,
+    threatWeightScale: 0.85,
+    bombThreatScale: 1.25,       // hold bombs longer in opening
+    bombNearbyScale: 1.35,
+    panicThreatScale: 1.10,
+    randomJitterScale: 1.20,
+    opponentLowHealthBonusScale: 0.80,
+  },
+  midgame: {
+    attackWeightScale: 1.00,
+    threatWeightScale: 1.00,
+    bombThreatScale: 1.00,
+    bombNearbyScale: 1.00,
+    panicThreatScale: 1.00,
+    randomJitterScale: 1.00,
+    opponentLowHealthBonusScale: 1.00,
+  },
+  endgame: {
+    attackWeightScale: 0.85,
+    threatWeightScale: 1.20,
+    bombThreatScale: 0.85,       // use bombs more freely in endgame
+    bombNearbyScale: 0.85,
+    panicThreatScale: 0.90,
+    randomJitterScale: 0.70,
+    opponentLowHealthBonusScale: 1.35,
+  },
+  survival: {
+    attackWeightScale: 0.60,
+    threatWeightScale: 1.60,
+    bombThreatScale: 0.65,       // bomb very aggressively in survival
+    bombNearbyScale: 0.65,
+    panicThreatScale: 0.75,
+    randomJitterScale: 0.30,
+    opponentLowHealthBonusScale: 1.10,
+  },
+};
+
+// Phase timing thresholds (milliseconds of match elapsed time).
+const PHASE_OPENING_END_MS = 18_000;   //  0–18 s
+const PHASE_MIDGAME_END_MS = 90_000;   // 18–90 s
+// Beyond 90 s = endgame; survival is health-driven and can trigger at any time.
+
 export class AIController {
   private readonly game: Game;
   private readonly player: Player;
@@ -116,6 +183,10 @@ export class AIController {
   private dodgeTarget: Vector2 | null = null;
   private dodgeRemainingMs = 0;
 
+  // Match phase state machine
+  private matchElapsedMs = 0;
+  private currentPhase: MatchPhase = 'opening';
+
   // Backward-compatible UI hook used by Game HUD.
   getChargeIntent(): { isCharging: boolean; progress: number; skill: string } {
     const chargingSkill = this.chargingTargetLevel >= 1 && this.player.isChargingNow();
@@ -132,6 +203,11 @@ export class AIController {
     };
   }
 
+  /** Returns the current match phase (for telemetry / HUD). */
+  getMatchPhase(): MatchPhase {
+    return this.currentPhase;
+  }
+
   constructor(game: Game, player: Player, side: PlayerSide, difficulty: Difficulty, policyProvider: PolicyDecisionProvider | null = null) {
     this.game = game;
     this.player = player;
@@ -142,6 +218,7 @@ export class AIController {
 
   update(deltaTime: number) {
     this.decisionAccumulator += deltaTime;
+    this.matchElapsedMs += deltaTime;
     this.updateEdgeDwell(deltaTime);
 
     if (this.charging && !this.player.isChargingNow()) {
@@ -172,8 +249,12 @@ export class AIController {
   }
 
   private makeDecision() {
+    // Recompute the match phase and get the adjusted profile for this decision.
+    this.currentPhase = this.computeMatchPhase();
+    const effectiveProfile = this.computePhaseProfile();
+
     const context = this.buildContext();
-    const movementPlan = this.chooseMovementPlan(context);
+    const movementPlan = this.chooseMovementPlanWithProfile(context, effectiveProfile);
     const observation = this.buildObservation(context);
     const policyDecision: PolicyDecision | null = this.resolvePolicyDecision(observation);
 
@@ -217,7 +298,7 @@ export class AIController {
       }
       this.lastFireExecuted = fireExecuted;
     } else {
-      skillRequested = this.selectSkillRequest(context, movementPlan);
+      skillRequested = this.selectSkillRequestWithProfile(context, movementPlan, effectiveProfile);
       skillExecuted = this.executeRequestedSkill(skillRequested);
 
       this.lastSkillRequested = skillRequested;
@@ -250,6 +331,7 @@ export class AIController {
         ts: Date.now(),
         side: this.side,
         ...tickMetadata,
+        matchPhase: this.currentPhase,
         playerCenter: observation.self.pos,
         movementTarget: movementPlan.target,
         movementScore: movementPlan.score,
@@ -668,7 +750,7 @@ export class AIController {
     }
   }
 
-  private selectSkillRequest(context: AIContext, plan: MovementPlan): SkillId {
+  private selectSkillRequestWithProfile(context: AIContext, plan: MovementPlan, prof: AIProfile): SkillId {
     const avail = this.player.getAvailableSkills();
     const boss = context.boss;
     const panicThreat = Math.max(context.currentThreat, plan.threat);
@@ -676,13 +758,13 @@ export class AIController {
     if (avail.bomb) {
       const bossOnMySide = boss?.side === this.side;
       const bossOnOpponentSide = Boolean(boss && boss.side !== this.side);
-      const criticalHealth = context.selfHealthRatio <= (this.profile.lowHealthRatio * 0.8);
-      const denseBullets = context.nearbyBulletCount >= this.profile.bombNearbyThreshold;
-      const highThreat = panicThreat >= (this.profile.bombThreatThreshold * 1.15);
-      const extremeThreat = panicThreat >= (this.profile.bombThreatThreshold * 1.4);
+      const criticalHealth = context.selfHealthRatio <= (prof.lowHealthRatio * 0.8);
+      const denseBullets = context.nearbyBulletCount >= prof.bombNearbyThreshold;
+      const highThreat = panicThreat >= (prof.bombThreatThreshold * 1.15);
+      const extremeThreat = panicThreat >= (prof.bombThreatThreshold * 1.4);
       const cornerTrap = this.edgeDwellMs >= 900;
 
-      if (cornerTrap && denseBullets && panicThreat >= (this.profile.bombThreatThreshold * 0.9)) {
+      if (cornerTrap && denseBullets && panicThreat >= (prof.bombThreatThreshold * 0.9)) {
         return 'bomb';
       }
 
@@ -692,7 +774,7 @@ export class AIController {
 
       if (bossOnOpponentSide && boss && boss.canTakeDamage()) {
         const bossHealthRatio = boss.health / Math.max(1, boss.maxHealth);
-        if (bossHealthRatio <= Math.max(0.12, this.profile.bossBombHealthThreshold * 0.7) && panicThreat <= this.profile.panicThreatThreshold * 0.9) {
+        if (bossHealthRatio <= Math.max(0.12, prof.bossBombHealthThreshold * 0.7) && panicThreat <= prof.panicThreatThreshold * 0.9) {
           return 'bomb';
         }
       }
@@ -703,7 +785,7 @@ export class AIController {
     }
 
     const maxUsefulLevel = context.maxUsefulLevel;
-    const desiredLevel = this.getDesiredSkillLevel(context, plan, maxUsefulLevel);
+    const desiredLevel = this.getDesiredSkillLevelWithProfile(context, plan, maxUsefulLevel, prof);
 
     // If there's a close enemy in front, prefer normal attack over charge skills (1..3).
     // Allow top-level releases (level 4) and bombs as usual.
@@ -717,7 +799,7 @@ export class AIController {
     if (desiredLevel >= 2 && avail.skill2) return 'skill2';
 
     // Avoid spamming level-1 by requiring an actual attack window.
-    if (desiredLevel >= 1 && avail.skill1 && plan.opportunity >= 0.95 && plan.threat <= this.profile.opportunisticBurstThreatMax) {
+    if (desiredLevel >= 1 && avail.skill1 && plan.opportunity >= 0.95 && plan.threat <= prof.opportunisticBurstThreatMax) {
       return 'skill1';
     }
 
@@ -823,14 +905,14 @@ export class AIController {
     };
   }
 
-  private chooseMovementPlan(context: AIContext): MovementPlan {
+  private chooseMovementPlanWithProfile(context: AIContext, prof: AIProfile): MovementPlan {
     const bullets = context.dangerousBullets;
     const screenHeight = this.game.getScreenHeight();
     const sideBounds = this.getSideBounds();
     const currentCenter = context.currentCenter;
     const laneCenterX = (sideBounds.minX + sideBounds.maxX) / 2;
     const halfLaneWidth = Math.max(1, (sideBounds.maxX - sideBounds.minX) / 2);
-    const calmFactor = this.clamp(1 - (context.currentThreat / Math.max(0.001, this.profile.panicThreatThreshold)), 0, 1);
+    const calmFactor = this.clamp(1 - (context.currentThreat / Math.max(0.001, prof.panicThreatThreshold)), 0, 1);
 
     const targetY = this.clamp(
       screenHeight * (0.66 + Math.min(context.currentThreat, 5) * 0.03),
@@ -852,19 +934,19 @@ export class AIController {
         const edgePenalty = this.computeEdgePenalty(candidateX, sideBounds);
         const yPenalty = Math.abs(candidateY - targetY) / 48;
         const centerDistance = Math.abs(candidateX - laneCenterX) / halfLaneWidth;
-        const edgeDwellScale = 1 + Math.min(2, this.edgeDwellMs / 1000) * this.profile.edgeDwellWeight;
-        const centerBias = centerDistance * this.profile.centerBiasWeight * (0.35 + calmFactor) * (1 + Math.min(1.5, this.edgeDwellMs / 1200));
+        const edgeDwellScale = 1 + Math.min(2, this.edgeDwellMs / 1000) * prof.edgeDwellWeight;
+        const centerBias = centerDistance * prof.centerBiasWeight * (0.35 + calmFactor) * (1 + Math.min(1.5, this.edgeDwellMs / 1200));
 
-        const score = (threat * this.profile.threatWeight)
-          - (opportunity * this.profile.attackWeight)
-          + (distanceCost * this.profile.moveWeight)
-          + (edgePenalty * this.profile.edgeWeight * edgeDwellScale)
+        const score = (threat * prof.threatWeight)
+          - (opportunity * prof.attackWeight)
+          + (distanceCost * prof.moveWeight)
+          + (edgePenalty * prof.edgeWeight * edgeDwellScale)
           + centerBias
           + (yPenalty * 0.25)
-          + (Math.random() * this.profile.randomJitter);
+          + (Math.random() * prof.randomJitter);
 
         const pressureScore = opportunity
-          - (threat * this.profile.pressureThreatPenalty)
+          - (threat * prof.pressureThreatPenalty)
           - (distanceCost / 250);
 
         if (!bestPlan || score < bestPlan.score) {
@@ -1117,47 +1199,47 @@ export class AIController {
     return 0;
   }
 
-  private getDesiredSkillLevel(context: AIContext, plan: MovementPlan, maxUsefulLevel: number): number {
+  private getDesiredSkillLevelWithProfile(context: AIContext, plan: MovementPlan, maxUsefulLevel: number, prof: AIProfile): number {
     if (maxUsefulLevel <= 0) {
       return 0;
     }
 
-    if (context.selfHealthRatio <= this.profile.lowHealthRatio) {
+    if (context.selfHealthRatio <= prof.lowHealthRatio) {
       return Math.min(1, maxUsefulLevel);
     }
 
-    if (context.currentThreat >= this.profile.panicThreatThreshold) {
+    if (context.currentThreat >= prof.panicThreatThreshold) {
       return Math.min(2, maxUsefulLevel);
     }
 
     let pressure = plan.pressureScore;
 
     if (context.boss && context.boss.side !== this.side) {
-      pressure += this.profile.bossPressureBonus;
+      pressure += prof.bossPressureBonus;
     }
 
     if (context.opponentHealthRatio <= 0.35) {
-      pressure += this.profile.opponentLowHealthBonus;
+      pressure += prof.opponentLowHealthBonus;
     }
 
-    if (pressure >= this.profile.pressureThresholds[3]) {
+    if (pressure >= prof.pressureThresholds[3]) {
       return Math.min(4, maxUsefulLevel);
     }
 
-    if (pressure >= this.profile.pressureThresholds[2]) {
+    if (pressure >= prof.pressureThresholds[2]) {
       return Math.min(3, maxUsefulLevel);
     }
 
-    if (pressure >= this.profile.pressureThresholds[1]) {
+    if (pressure >= prof.pressureThresholds[1]) {
       return Math.min(2, maxUsefulLevel);
     }
 
-    if (pressure >= this.profile.pressureThresholds[0]) {
+    if (pressure >= prof.pressureThresholds[0]) {
       return Math.min(1, maxUsefulLevel);
     }
 
     // With unlimited top-level release enabled, keep charging for level 4 under mild pressure.
-    if (this.profile.allowUnlimitedTopSkill && pressure > 0.35 && context.currentThreat < this.profile.panicThreatThreshold) {
+    if (prof.allowUnlimitedTopSkill && pressure > 0.35 && context.currentThreat < prof.panicThreatThreshold) {
       return 4;
     }
 
@@ -1282,6 +1364,64 @@ export class AIController {
           minNonBombSkillIntervalMs: 850,
         };
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase state machine implementation
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Compute the current match phase from elapsed time and health ratios.
+   *
+   * Health-driven transitions (survival) can override time-based phases at
+   * any point, exactly as PoDD overrides its scripted timing when health drops
+   * into critical territory.
+   */
+  private computeMatchPhase(): MatchPhase {
+    const selfHealth = this.player.health / 100;
+    const opponentSide = this.getOpponentSide();
+    const opponentPlayer = this.game.getPlayer(opponentSide);
+    const opponentHealth = opponentPlayer ? opponentPlayer.health / 100 : 1;
+    const minHealth = Math.min(selfHealth, opponentHealth);
+
+    // Survival phase: either player is critically low — shift to full defense.
+    if (selfHealth <= 0.20 || minHealth <= 0.15) {
+      return 'survival';
+    }
+
+    // Endgame: either player is below 40 % OR the match has run long.
+    if (minHealth <= 0.40 || this.matchElapsedMs >= PHASE_MIDGAME_END_MS) {
+      return 'endgame';
+    }
+
+    // Opening phase: first 18 seconds of the match.
+    if (this.matchElapsedMs < PHASE_OPENING_END_MS) {
+      return 'opening';
+    }
+
+    return 'midgame';
+  }
+
+  /**
+   * Return a copy of the base difficulty profile with phase-specific
+   * multipliers applied to the parameters that most affect tactical choices.
+   *
+   * Only the parameters relevant to macro-level phase control are adjusted;
+   * low-level physics constants (deadZone, releaseWindows, etc.) stay fixed.
+   */
+  private computePhaseProfile(): AIProfile {
+    const adj = PHASE_ADJUSTMENTS[this.currentPhase];
+
+    return {
+      ...this.profile,
+      attackWeight: this.profile.attackWeight * adj.attackWeightScale,
+      threatWeight: this.profile.threatWeight * adj.threatWeightScale,
+      bombThreatThreshold: this.profile.bombThreatThreshold * adj.bombThreatScale,
+      bombNearbyThreshold: Math.round(this.profile.bombNearbyThreshold * adj.bombNearbyScale),
+      panicThreatThreshold: this.profile.panicThreatThreshold * adj.panicThreatScale,
+      randomJitter: this.profile.randomJitter * adj.randomJitterScale,
+      opponentLowHealthBonus: this.profile.opponentLowHealthBonus * adj.opponentLowHealthBonusScale,
+    };
   }
 
   private getOpponentSide(): PlayerSide {
